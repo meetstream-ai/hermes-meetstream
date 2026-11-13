@@ -274,8 +274,11 @@ class MeetStreamAdapter(BasePlatformAdapter):
             w.seen.add(msg_id)
             try:
                 await self._on_chat(w, message, msg_id)
-            except Exception:
-                logger.exception("[%s] Failed to handle chat message %s", self.name, msg_id)
+            except Exception as e:
+                # msg_id can embed the chat text when MeetStream gives no messageId: content only at DEBUG.
+                logger.warning("[%s] Failed to handle a chat message on bot %s: %s", self.name, w.bot_id,
+                               type(e).__name__)
+                logger.debug("[%s] Failed chat message %s", self.name, msg_id, exc_info=True)
 
     @staticmethod
     def _message_id(bot_id: str, message: dict) -> str:
