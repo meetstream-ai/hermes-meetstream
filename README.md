@@ -92,6 +92,9 @@ Hermes continues to record the call and to take notes.
 - **Display names are not a proof of identity.** A guest can type any name when the guest joins a call.
   Thus, a guest can use a name from your allowed list.
   Use `MEETSTREAM_ALLOWED_USERS="*"` only for calls with people that you trust.
+  MeetStream does not give a stable identifier for a participant. Thus, the plugin cannot do a better check.
+- **Hermes also accepts the names in `GATEWAY_ALLOWED_USERS`.** If that list contains a name, a meeting guest with that display name can ask Hermes questions.
+- **Hermes answers only in the calls of its own bots.** The gateway does not send messages to other bots of your account.
 - **Limit the tools for meeting chat.** A question in the chat starts a full Hermes turn.
   We recommend a small toolset for the `meetstream` platform. Add this to `config.yaml`:
 
@@ -144,6 +147,9 @@ Set these items at <https://app.meetstream.ai>. You do not have to install Herme
 - A chat message that starts with the bot name goes to Hermes as a message from that person.
   The answer of Hermes goes back to the same meeting chat.
 - When the bot leaves the call, the gateway stops the reads for that bot.
+- The search reads the 200 most recent bots of the last day. On an account with more bots in one day, use `meetstream_join` to start Hermes bots.
+- If the gateway finds a bot more than 5 minutes after the bot started, Hermes does not answer the older chat messages.
+  The same occurs after a restart of the gateway. Ask the question again.
 
 ## Network calls and data
 

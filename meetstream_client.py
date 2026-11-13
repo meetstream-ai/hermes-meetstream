@@ -104,15 +104,31 @@ def norm_status(value: Any) -> str:
 
 
 def validate_meeting_url(url: str) -> str:
-    """Return the stripped URL, or raise ``ValueError`` for anything that is not an https meeting link."""
+    """The meeting link rebuilt from its parsed parts, so the host checked here is the host the bot
+    opens. Raises ``ValueError`` for anything that is not a plain https Zoom / Meet / Teams link."""
     url = (url or "").strip()
+    if not url or re.search(r"[\s\\\x00-\x1f\x7f]", url):
+        raise ValueError("meeting_url must be an https:// Zoom, Google Meet or Microsoft Teams link")
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not host:
+    if parsed.scheme != "https" or not host or "@" in parsed.netloc:
         raise ValueError("meeting_url must be an https:// Zoom, Google Meet or Microsoft Teams link")
     if not any(host == h or host.endswith("." + h) for h in MEETING_HOSTS):
         raise ValueError(f"{host} is not a Zoom, Google Meet or Microsoft Teams host")
-    return url
+    port = f":{parsed.port}" if parsed.port else ""
+    rebuilt = f"https://{host}{port}{parsed.path}"
+    return rebuilt + (f"?{parsed.query}" if parsed.query else "") + (f"#{parsed.fragment}" if parsed.fragment else "")
+
+
+_BOT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def bot_path(bot_id: str, action: str = "") -> str:
+    """``/bots/<id>[/action]`` for a well-formed bot id; ``ValueError`` otherwise (no path injection)."""
+    bot_id = str(bot_id or "").strip()
+    if not _BOT_ID_RE.match(bot_id):
+        raise ValueError(f"invalid bot_id {bot_id[:40]!r}")
+    return f"/bots/{bot_id}/{action}" if action else f"/bots/{bot_id}"
 
 
 def build_join_payload(meeting_url: str, *, bot_name: str, message: str = "", join_at: str = "",
@@ -164,7 +180,7 @@ def is_hermes_bot(record: dict, bot_name: str) -> bool:
     value = attrs.get(HERMES_ATTR) if isinstance(attrs, dict) else None
     if value is True or str(value).lower() == "true":
         return True
-    name = _norm_name(field(record, "BotUsername", "bot_name", "BotName"))
+    name = _norm_name(field(record, "bot_username", "BotUsername", "bot_name"))
     return bool(name) and name == _norm_name(bot_name)
 
 
@@ -175,11 +191,11 @@ async def create_bot(client, key, payload: dict) -> dict:
 
 
 async def bot_status(client, key, bot_id: str) -> dict:
-    return await request(client, key, "GET", f"/bots/{bot_id}/status")
+    return await request(client, key, "GET", bot_path(bot_id, "status"))
 
 
 async def bot_detail(client, key, bot_id: str) -> dict:
-    return await request(client, key, "GET", f"/bots/{bot_id}/detail")
+    return await request(client, key, "GET", bot_path(bot_id, "detail"))
 
 
 async def list_bots(client, key, params: Optional[dict] = None) -> dict:
@@ -187,17 +203,17 @@ async def list_bots(client, key, params: Optional[dict] = None) -> dict:
 
 
 async def get_chats(client, key, bot_id: str) -> list[dict]:
-    data = await request(client, key, "GET", f"/bots/{bot_id}/get_chats")
+    data = await request(client, key, "GET", bot_path(bot_id, "get_chats"))
     messages = data.get("chatMessages") if isinstance(data, dict) else None
     return [m for m in (messages or []) if isinstance(m, dict)]
 
 
 async def send_message(client, key, bot_id: str, text: str) -> dict:
-    return await request(client, key, "POST", f"/bots/{bot_id}/send_message", body={"message": text[:MAX_CHAT]})
+    return await request(client, key, "POST", bot_path(bot_id, "send_message"), body={"message": text[:MAX_CHAT]})
 
 
 async def remove_bot(client, key, bot_id: str) -> dict:
-    return await request(client, key, "GET", f"/bots/{bot_id}/remove_bot")
+    return await request(client, key, "GET", bot_path(bot_id, "remove_bot"))
 
 
 async def transcript(client, key, bot_id: str) -> tuple[Optional[str], Any]:
@@ -205,11 +221,13 @@ async def transcript(client, key, bot_id: str) -> tuple[Optional[str], Any]:
     detail = await bot_detail(client, key, bot_id)
     tid = field(detail.get("bot_details") or {}, "transcript_id") or field(detail, "transcript_id")
     if not tid:
-        runs = (await request(client, key, "GET", f"/bots/{bot_id}/transcriptions")).get("transcriptions") or []
+        runs = (await request(client, key, "GET", bot_path(bot_id, "transcriptions"))).get("transcriptions") or []
         done = [r for r in runs if re.search(r"success|completed", str(r.get("status", "")), re.I)]
         tid = (done or runs or [{}])[0].get("transcript_id")
     if not tid:
         return None, None
+    if not _BOT_ID_RE.match(str(tid)):
+        raise MeetStreamError(0, "MeetStream returned a malformed transcript_id")
     try:
         data = await request(client, key, "GET", f"/transcript/{tid}/get_transcript")
     except MeetStreamError as e:

@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -49,12 +50,16 @@ class FakeMeetStream:
         self.created: list[dict] = []
         self.requests: list[httpx.Request] = []
         self.reject_key = False
+        self.page_size = 50
+        self.broken: dict[str, int] = {}  # bot_id -> HTTP status its per-bot endpoints return
+        self.bot_display = "Hermes"  # how the meeting shows the bot's own chat messages
 
-    def add_bot(self, bot_id, status="InMeeting", hermes=True, chats=(), name="Hermes", attrs=None):
+    def add_bot(self, bot_id, status="InMeeting", hermes=True, chats=(), name="Hermes", attrs=None, age_s=3600):
         if attrs is None:
             attrs = {"hermes": True} if hermes else {}
         self.bots[bot_id] = {"status": status, "attrs": attrs, "chats": list(chats),
-                             "name": name if hermes or attrs else "MeetStream Bot"}
+                             "name": name if hermes or attrs else "MeetStream Bot",
+                             "created_at": time.time() - age_s}
 
     def say(self, bot_id, who, text):
         chats = self.bots[bot_id]["chats"]
@@ -74,10 +79,16 @@ class FakeMeetStream:
             return httpx.Response(201, json={"bot_id": "bot-new", "status": "Active",
                                              "meeting_url": body["meeting_link"], "transcript_id": None})
         if path == "/bots":
-            rows = [{"BotID": b, "Status": v["status"], "BotUsername": v["name"], "CustomAttributes": v["attrs"]}
-                    for b, v in self.bots.items()]
-            return httpx.Response(200, json={"bots": rows, "hasNextPage": False})
+            rows = [{"bot_id": b, "status": v["status"], "bot_username": v["name"], "custom_attributes": v["attrs"],
+                     "created_at": v["created_at"]} for b, v in self.bots.items()]
+            start = int(request.url.params.get("cursor") or 0)
+            page = rows[start:start + self.page_size]
+            more = start + self.page_size < len(rows)
+            return httpx.Response(200, json={"bots": page, "hasNextPage": more,
+                                             "nextCursor": str(start + self.page_size) if more else None})
         bot = self.bots.get(parts[1]) if len(parts) > 2 else None
+        if parts[1:2] and parts[1] in self.broken:
+            return httpx.Response(self.broken[parts[1]], json={"detail": "broken"})
         if bot is None:
             return httpx.Response(404, json={"detail": "Bot not found."})
         action = parts[2]
@@ -88,7 +99,8 @@ class FakeMeetStream:
         if action == "send_message":
             text = json.loads(request.content)["message"]
             self.sent.append((parts[1], text))
-            bot["chats"].append({"messageId": f"m{len(bot['chats'])}", "speakerDisplayName": "Hermes", "text": text})
+            bot["chats"].append({"messageId": f"m{len(bot['chats'])}", "speakerDisplayName": self.bot_display,
+                                 "text": text})
             return httpx.Response(200, json={"status": "sent", "bot_id": parts[1]})
         if action == "remove_bot":
             bot["status"] = "Stopped"
@@ -125,17 +137,20 @@ class PluginTestCase(unittest.TestCase):
 
 class TestAddressing(unittest.TestCase):
     def test_messages_that_address_the_bot(self):
-        names = ["Hermes"]
-        self.assertEqual(adapter_mod.addressed("Hermes, what did we decide?", names), "what did we decide?")
-        self.assertEqual(adapter_mod.addressed("@hermes summarize so far", names), "summarize so far")
-        self.assertEqual(adapter_mod.addressed("hey Hermes: next steps?", names), "next steps?")
-        self.assertEqual(adapter_mod.addressed("can you check this @Hermes", names), "can you check this")
+        a = adapter_mod.addressed
+        self.assertEqual(a("Hermes, what did we decide?", "Hermes"), "what did we decide?")
+        self.assertEqual(a("@hermes summarize so far", "Hermes"), "summarize so far")
+        self.assertEqual(a("hey Hermes: next steps?", "Hermes"), "next steps?")
+        self.assertEqual(a("can you check this @Hermes", "Hermes"), "can you check this")
+        self.assertEqual(a("Acme  AI, hello there", "acme ai"), "hello there")
+        self.assertEqual(a("Notes Bot! what is next", "Notes Bot"), "what is next")
 
     def test_messages_that_do_not(self):
-        names = ["Hermes"]
-        self.assertIsNone(adapter_mod.addressed("let's ask Hermes later", names))
-        self.assertIsNone(adapter_mod.addressed("Hermesville is a town", names))
-        self.assertIsNone(adapter_mod.addressed("Hermes", names))
+        a = adapter_mod.addressed
+        for text in ("let's ask Hermes later", "Hermesville is a town", "Hermes", "Hermes-ville is a town",
+                     "Hermes's notes are good", "mail me at me@hermes.com", "write to @hermes.com today"):
+            self.assertIsNone(a(text, "Hermes"), text)
+        self.assertIsNone(a("Hermes, hi", ""))
 
 
 class TestPayload(unittest.TestCase):
@@ -152,6 +167,21 @@ class TestPayload(unittest.TestCase):
                 api.build_join_payload(url, bot_name="Hermes")
         api.build_join_payload("https://us02web.zoom.us/j/123", bot_name="Hermes")
         api.build_join_payload("https://teams.microsoft.com/l/meetup-join/x", bot_name="Hermes")
+
+    def test_link_that_parsers_read_differently_is_refused(self):
+        for url in ("https://evil.example\\@meet.google.com/x", "https://user@meet.google.com/x",
+                    "https://meet.google.com/x y", "https://meet.google.com\t.evil.example/x"):
+            with self.assertRaises(ValueError, msg=url):
+                api.validate_meeting_url(url)
+        self.assertEqual(api.validate_meeting_url(" https://MEET.google.com/abc-defg-hij?authuser=1 "),
+                         "https://meet.google.com/abc-defg-hij?authuser=1")
+
+    def test_bot_id_cannot_change_the_api_path(self):
+        for bad in ("../users", "a/b", "x?y=1", "", "a" * 200):
+            with self.assertRaises(ValueError, msg=bad):
+                api.bot_path(bad, "status")
+        self.assertEqual(api.bot_path("604c0a0b-973d-4eb1-a5bf-2c7513f6bbe0", "status"),
+                         "/bots/604c0a0b-973d-4eb1-a5bf-2c7513f6bbe0/status")
 
     def test_chunks_fit_meeting_chat(self):
         parts = api.chunks(("word " * 1000).strip())
@@ -243,11 +273,94 @@ class TestAdapter(PluginTestCase):
         self.assertIn("cal-2", a._bots)
         self.assertNotIn("plain", a._bots)
 
+    def test_one_broken_bot_does_not_starve_the_others(self):
+        async def go():
+            a = self.make_adapter(discovery_seconds=0)
+            for b in ("gone", "ok"):
+                adapter_mod.watch(b)
+                self.fake.add_bot(b)
+            self.fake.broken["gone"] = 404
+            self.fake.say("ok", "Sid", "Hermes, are you there?")
+            await a._tick()
+            await a._client.aclose()
+            return a
+        a = self.run_async(go())
+        self.assertNotIn("gone", a._bots)
+        a.handle_message.assert_awaited_once()
+        self.assertFalse(a.has_fatal_error)
+
+    def test_forbidden_bot_is_dropped_without_stopping_the_platform(self):
+        async def go():
+            a = self.make_adapter(discovery_seconds=0)
+            adapter_mod.watch("other-account")
+            self.fake.add_bot("other-account")
+            self.fake.broken["other-account"] = 403
+            await a._tick()
+            await a._client.aclose()
+            return a
+        a = self.run_async(go())
+        self.assertNotIn("other-account", a._bots)
+        self.assertFalse(a.has_fatal_error)
+
+    def test_discovery_reads_every_page(self):
+        async def go():
+            a = self.make_adapter()
+            self.fake.page_size = 2
+            for i in range(5):
+                self.fake.add_bot(f"plain-{i}", hermes=False)
+            self.fake.add_bot("late-hermes")
+            await a._discover()
+            await a._client.aclose()
+            return a
+        a = self.run_async(go())
+        self.assertIn("late-hermes", a._bots)
+
+    def test_fresh_bot_found_by_discovery_answers_early_questions(self):
+        async def go():
+            a = self.make_adapter()
+            self.fake.add_bot("cli-bot", age_s=30)  # started from a CLI session a moment ago
+            self.fake.say("cli-bot", "Sid", "Hermes, first question")
+            await a._tick()
+            await a._client.aclose()
+            return a
+        a = self.run_async(go())
+        a.handle_message.assert_awaited_once()
+
+    def test_reply_is_not_read_back_when_meeting_renames_the_bot(self):
+        async def go():
+            a = self.make_adapter(discovery_seconds=0)
+            adapter_mod.watch("b1")
+            self.fake.add_bot("b1")
+            self.fake.bot_display = "Meeting Notetaker"
+            await a._tick()
+            await a.send("b1", "Hermes, here is the answer")
+            await a._tick()
+            await a._client.aclose()
+            return a
+        a = self.run_async(go())
+        a.handle_message.assert_not_awaited()
+
+    def test_send_refuses_a_bot_hermes_is_not_in(self):
+        async def go():
+            a = self.make_adapter()
+            result = await a.send("someone-elses-bot", "hello")
+            await a._client.aclose()
+            return result
+        self.fake.add_bot("someone-elses-bot")
+        result = self.run_async(go())
+        self.assertFalse(result.success)
+        self.assertEqual(self.fake.sent, [])
+
+    def test_bad_poll_setting_falls_back_to_default(self):
+        a = adapter_mod.MeetStreamAdapter(PlatformConfig(enabled=True, extra={"chat_poll_seconds": "fast"}))
+        self.assertEqual(a._chat_poll, adapter_mod.CHAT_POLL_S)
+
     def test_own_replies_are_not_read_back_as_questions(self):
         async def go():
             a = self.make_adapter(discovery_seconds=0)
             adapter_mod.watch("b1")
             self.fake.add_bot("b1")
+            await a._tick()
             result = await a.send("b1", "Hermes, here is the answer")
             await a._tick()
             await a._client.aclose()
@@ -259,6 +372,7 @@ class TestAdapter(PluginTestCase):
     def test_long_reply_is_split_into_chat_sized_messages(self):
         async def go():
             a = self.make_adapter()
+            a._bots["b1"] = adapter_mod._Watch("b1")
             await a.send("b1", "x " * 1500)
             await a._client.aclose()
         self.fake.add_bot("b1")
