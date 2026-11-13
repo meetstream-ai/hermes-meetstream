@@ -29,6 +29,7 @@ plugin = _load_plugin()
 api = sys.modules[f"{PKG}.meetstream_client"]
 adapter_mod = sys.modules[f"{PKG}.adapter"]
 tools = sys.modules[f"{PKG}.tools"]
+guard = sys.modules[f"{PKG}.guard"]
 
 from gateway.config import PlatformConfig  # noqa: E402
 from gateway.platform_registry import PlatformEntry, platform_registry  # noqa: E402
@@ -417,6 +418,52 @@ class TestAdapter(PluginTestCase):
         self.assertGreaterEqual(a._chat_poll, adapter_mod.MIN_POLL_S)
 
 
+class TestMeetingGuard(unittest.TestCase):
+    """Meeting chat senders are display names anyone can type, so meeting turns get web search only."""
+
+    def setUp(self):
+        guard._MEETING_IDS.clear()
+
+    def test_meeting_turn_blocks_everything_but_web_search(self):
+        guard.on_pre_llm_call(session_id="s-meet", task_id="t-meet", platform="meetstream")
+        for tool in ("terminal", "write_file", "patch", "execute_code", "delegate_task", "memory",
+                     "mcp__fs__read_file", "meetstream_join", "meetstream_transcript", "send_message"):
+            verdict = guard.on_pre_tool_call(tool_name=tool, session_id="s-meet", task_id="t-meet")
+            self.assertEqual((verdict or {}).get("action"), "block", tool)
+        for tool in ("web_search", "web_extract"):
+            self.assertIsNone(guard.on_pre_tool_call(tool_name=tool, session_id="s-meet"))
+
+    def test_task_id_alone_identifies_the_meeting_turn(self):
+        guard.on_pre_llm_call(session_id="", task_id="t-only", platform="meetstream")
+        self.assertEqual(guard.on_pre_tool_call(tool_name="terminal", task_id="t-only")["action"], "block")
+
+    def test_other_platforms_are_untouched(self):
+        guard.on_pre_llm_call(session_id="s-cli", platform="cli")
+        guard.on_pre_llm_call(session_id="s-tg", platform="telegram")
+        for sid in ("s-cli", "s-tg", "", "unknown"):
+            self.assertIsNone(guard.on_pre_tool_call(tool_name="terminal", session_id=sid))
+
+    def test_tracking_is_bounded(self):
+        for i in range(guard._MAX_TRACKED + 50):
+            guard.on_pre_llm_call(session_id=f"s{i}", platform="meetstream")
+        self.assertLessEqual(len(guard._MEETING_IDS), guard._MAX_TRACKED)
+        self.assertTrue(guard.is_meeting_turn(session_id=f"s{guard._MAX_TRACKED + 49}"))
+
+    def test_adapter_pins_meeting_turns_to_web_without_mcp(self):
+        a = adapter_mod.MeetStreamAdapter(PlatformConfig(enabled=True, extra={}))
+        self.assertEqual(a.toolsets_for_source(None), ["web", "no_mcp"])
+
+    def test_hermes_resolves_the_override_without_shell_files_or_mcp(self):
+        # The gateway feeds toolsets_for_source() through this same resolver (gateway/run_turn.py).
+        from hermes_cli.tools_config import _get_platform_tools
+
+        cfg = {"platform_toolsets": {"meetstream": ["web", "no_mcp"]},
+               "mcp_servers": {"localfs": {"command": "npx", "args": ["fs-server"]}}}
+        enabled = _get_platform_tools(cfg, "meetstream")
+        self.assertIn("web", enabled)
+        self.assertFalse({"terminal", "file", "code_execution", "delegation", "localfs"} & enabled, enabled)
+
+
 class TestRegistration(unittest.TestCase):
     def test_registers_declared_tools_platform_and_skill(self):
         ctx = mock.MagicMock()
@@ -430,6 +477,8 @@ class TestRegistration(unittest.TestCase):
             declared.append(line[4:].strip())
         self.assertEqual(sorted(names), sorted(declared))
         self.assertEqual(ctx.register_platform.call_args.kwargs["name"], "meetstream")
+        hooks = {c.args[0] for c in ctx.register_hook.call_args_list}
+        self.assertEqual(hooks, {"pre_llm_call", "pre_tool_call"})
         self.assertEqual(ctx.register_skill.call_args.args[0], "hermes-in-meetings")
 
 

@@ -1,7 +1,7 @@
 name: meetstream
 label: Hermes in Meetings
 kind: platform
-version: 0.1.0
+version: 0.2.0
 requires_hermes: ">=0.23.0"
 author: MeetStream
 description: >
@@ -16,6 +16,9 @@ provides_tools:
   - meetstream_chat
   - meetstream_transcript
   - meetstream_leave
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
 requires_env:
   - name: MEETSTREAM_API_KEY
     description: "MeetStream API key (starts with ms_)"

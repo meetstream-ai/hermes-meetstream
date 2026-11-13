@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import adapter, tools
+from . import adapter, guard, tools
 
 _SKILLS = Path(__file__).resolve().parent / "skills"
 
@@ -29,5 +29,7 @@ def register(ctx) -> None:
         ctx.register_tool(name=name, toolset="meetstream", schema=schema, handler=handler,
                           check_fn=tools.check_requirements, is_async=True,
                           description=schema["description"], emoji=emoji)
+    ctx.register_hook("pre_llm_call", guard.on_pre_llm_call)
+    ctx.register_hook("pre_tool_call", guard.on_pre_tool_call)
     for skill_dir in sorted(p for p in _SKILLS.iterdir() if (p / "SKILL.md").is_file()):
         ctx.register_skill(skill_dir.name, skill_dir / "SKILL.md")

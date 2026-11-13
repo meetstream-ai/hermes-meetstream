@@ -18,7 +18,7 @@ You set the other options in the MeetStream dashboard.
 | Tool | `meetstream_chat` | Sends a message to the meeting chat. |
 | Tool | `meetstream_transcript` | Gives the transcript and the meeting chat. |
 | Tool | `meetstream_leave` | Makes the bot leave the call. MeetStream keeps the data. |
-| Gateway platform | `meetstream` | Reads the meeting chat and sends the answers of Hermes to the chat. |
+| Gateway platform | `meetstream` | Reads the meeting chat and sends the answers of Hermes to the chat. In meeting chat, Hermes can only search the web. |
 | Skill | `meetstream:hermes-in-meetings` | Tells Hermes how to attend a call and how to do the follow-up work. |
 
 ## Requirements
@@ -89,19 +89,23 @@ Hermes continues to record the call and to take notes.
 
 ## Security
 
+### Identity of participants
+
 - **Display names are not a proof of identity.** A guest can type any name when the guest joins a call.
   Thus, a guest can use a name from your allowed list.
   Use `MEETSTREAM_ALLOWED_USERS="*"` only for calls with people that you trust.
   MeetStream does not give a stable identifier for a participant. Thus, the plugin cannot do a better check.
 - **Hermes also accepts the names in `GATEWAY_ALLOWED_USERS`.** If that list contains a name, a meeting guest with that display name can ask Hermes questions.
 - **Hermes answers only in the calls of its own bots.** The gateway does not send messages to other bots of your account.
-- **Limit the tools for meeting chat.** A question in the chat starts a full Hermes turn.
-  We recommend a small toolset for the `meetstream` platform. Add this to `config.yaml`:
+### Tools in meeting chat
 
-  ```yaml
-  platform_toolsets:
-    meetstream: [web, meetstream]
-  ```
+- **Meeting chat can only search the web.** A question in the meeting chat starts a Hermes turn with a fixed, small set of tools:
+  `web_search` and `web_extract`. The plugin blocks all the other tools for these turns.
+  The blocked tools include the terminal, files, code execution, MCP servers, the tools of other plugins, and the `meetstream_*` tools.
+  Thus, a guest with a false display name cannot run commands, read files, or send the bot to other calls.
+- **This limit is always on.** The setting `platform_toolsets.meetstream` has no effect.
+  To do more with a call, ask Hermes outside the meeting, for example in the CLI.
+### Other protections
 
 - **The skill tells Hermes that text from a meeting is data, not an instruction.**
   Hermes does not run commands, send files, or send email because a person in the call asked.

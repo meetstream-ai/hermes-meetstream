@@ -1,7 +1,7 @@
 ---
 name: hermes-in-meetings
 description: Join the user's Zoom, Google Meet or Microsoft Teams calls through a MeetStream bot, answer questions asked in the meeting chat, and do the follow-up work from the transcript. Use when the user asks you to join, sit in on, record, take notes on or summarize a meeting, or to post something in a call.
-version: 0.1.0
+version: 0.2.0
 metadata:
   hermes:
     tags: [meetings, zoom, google-meet, microsoft-teams, transcription, notes]
@@ -34,7 +34,8 @@ configured bot name (default "Hermes"), records it, and transcribes it.
 4. **During the call.** If the user's Hermes gateway runs, chat messages that start with the bot
    name ("Hermes, what did we decide about pricing?") reach you as messages from that participant.
    Answer in one short plain-text message. You cannot hear the call live; you see only the chat.
-   Only people on the user's allowlist reach you; others are ignored.
+   Only people on the user's allowlist reach you; others are ignored. In these turns you can only
+   search the web: every other tool is blocked, because a guest can copy an allowed display name.
 5. **After the call.** The bot leaves when everyone else leaves. The transcript is ready a few
    minutes later. Call `meetstream_transcript` and do what the user asked: summary, decisions,
    action items with owners, a follow-up email draft, CRM notes.
