@@ -142,7 +142,7 @@ class MeetStreamAdapter(BasePlatformAdapter):
         self._bots: dict[str, _Watch] = {}
         self._sent: dict[str, list[str]] = {}
         self._bot_name = "Hermes"
-        self._discovered_at = 0.0
+        self._discovered_at = float("-inf")  # discover on the first tick (monotonic() can be < 120 s after boot)
         self._dedup = MessageDeduplicator(max_size=5000, ttl_seconds=6 * 3600)
 
     def normalize_user_id(self, user_id: Any) -> str:

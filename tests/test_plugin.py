@@ -351,6 +351,16 @@ class TestAdapter(PluginTestCase):
         self.assertFalse(result.success)
         self.assertEqual(self.fake.sent, [])
 
+    def test_first_tick_discovers_even_right_after_boot(self):
+        async def go():
+            a = self.make_adapter()
+            self.fake.add_bot("cal-3")
+            with mock.patch.object(adapter_mod.time, "monotonic", return_value=5.0):
+                await a._tick()
+            await a._client.aclose()
+            return a
+        self.assertIn("cal-3", self.run_async(go())._bots)
+
     def test_bad_poll_setting_falls_back_to_default(self):
         a = adapter_mod.MeetStreamAdapter(PlatformConfig(enabled=True, extra={"chat_poll_seconds": "fast"}))
         self.assertEqual(a._chat_poll, adapter_mod.CHAT_POLL_S)
