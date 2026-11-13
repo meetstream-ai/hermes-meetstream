@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import adapter, guard, tools
+from . import adapter, guard, meetstream_tools as tools
 
 _SKILLS = Path(__file__).resolve().parent / "skills"
 

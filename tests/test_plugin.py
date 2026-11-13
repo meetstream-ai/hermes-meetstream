@@ -28,7 +28,7 @@ def _load_plugin():
 plugin = _load_plugin()
 api = sys.modules[f"{PKG}.meetstream_client"]
 adapter_mod = sys.modules[f"{PKG}.adapter"]
-tools = sys.modules[f"{PKG}.tools"]
+tools = sys.modules[f"{PKG}.meetstream_tools"]
 guard = sys.modules[f"{PKG}.guard"]
 
 from gateway.config import PlatformConfig  # noqa: E402
@@ -432,6 +432,25 @@ class TestMeetingGuard(unittest.TestCase):
             self.assertEqual((verdict or {}).get("action"), "block", tool)
         for tool in ("web_search", "web_extract"):
             self.assertIsNone(guard.on_pre_tool_call(tool_name=tool, session_id="s-meet"))
+
+    def test_platform_object_and_enum_spellings_count(self):
+        from gateway.config import Platform
+
+        guard.on_pre_llm_call(session_id="s-obj", platform=Platform("meetstream"))
+        guard.on_pre_llm_call(session_id="s-enum", platform="Platform.MEETSTREAM")
+        guard.on_pre_llm_call(session_id="s-pad", platform=" MeetStream ")
+        for sid in ("s-obj", "s-enum", "s-pad"):
+            self.assertEqual(guard.on_pre_tool_call(tool_name="terminal", session_id=sid)["action"], "block", sid)
+        guard.on_pre_llm_call(session_id="s-near", platform="meetstream-like")
+        self.assertIsNone(guard.on_pre_tool_call(tool_name="terminal", session_id="s-near"))
+
+    def test_active_meeting_session_is_not_evicted(self):
+        guard.on_pre_llm_call(session_id="s-live", platform="meetstream")
+        for i in range(guard._MAX_TRACKED - 1):
+            guard._remember(f"filler-{i}")
+        guard.on_pre_tool_call(tool_name="terminal", session_id="s-live")  # refreshes s-live
+        guard._remember("one-more")
+        self.assertTrue(guard.is_meeting_turn(session_id="s-live"))
 
     def test_task_id_alone_identifies_the_meeting_turn(self):
         guard.on_pre_llm_call(session_id="", task_id="t-only", platform="meetstream")

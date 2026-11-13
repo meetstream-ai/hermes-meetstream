@@ -212,7 +212,7 @@ class MeetStreamAdapter(BasePlatformAdapter):
             await asyncio.sleep(max(0.0, self._chat_poll - (time.monotonic() - started)))
 
     async def _tick(self) -> None:
-        from .tools import settings
+        from .meetstream_tools import settings
 
         self._bot_name = str(settings()["bot_name"]).strip() or "Hermes"
         while _PENDING:
