@@ -147,6 +147,9 @@ Set these items at <https://app.meetstream.ai>. You do not have to install Herme
 - A chat message that starts with the bot name goes to Hermes as a message from that person.
   The answer of Hermes goes back to the same meeting chat.
 - When the bot leaves the call, the gateway stops the reads for that bot.
+
+## Limits
+
 - The search reads the 200 most recent bots of the last day. On an account with more bots in one day, use `meetstream_join` to start Hermes bots.
 - If the gateway finds a bot more than 5 minutes after the bot started, Hermes does not answer the older chat messages.
   The same occurs after a restart of the gateway. Ask the question again.
