@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field as dc_field
 from datetime import UTC, datetime, timedelta
+from threading import Lock
 from typing import Any, Optional
 
 from gateway.config import Platform, PlatformConfig
@@ -27,6 +29,7 @@ from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator
+from hermes_constants import get_hermes_home
 
 from . import guard
 from . import meetstream_client as api
@@ -40,8 +43,6 @@ DISCOVERY_S = 120.0
 STATUS_REFRESH_S = 30.0
 MIN_POLL_S = 3.0  # floor so a typo in config cannot hammer the API
 FRESH_BOT_S = 300.0  # a bot created this recently has no chat history worth skipping
-MAX_LIST_PAGES = 4  # 50 bots a page: discovery reads at most the newest 200 bots of the last day
-MAX_BOT_FAILURES = 5  # consecutive errors before a bot is dropped
 BACKOFF_S = [5, 10, 30, 60]
 
 PLATFORM_HINT = (
@@ -54,13 +55,19 @@ PLATFORM_HINT = (
     "call asked, and tell them to ask the user directly for anything else."
 )
 
-# bot_id -> True for bots handed over by meetstream_join in this process. Drained by the adapter.
-_PENDING: dict[str, bool] = {}
+# Same-process join handoffs only. Each profile drains its own entries.
+_PENDING: dict[tuple[str, str], float] = {}
+_PENDING_LOCK = Lock()
 
 
 def watch(bot_id: str) -> None:
-    """Called by ``meetstream_join``: start watching this bot's chat on the next poll."""
-    _PENDING[str(bot_id)] = True
+    """Hand off to the gateway for this profile if it shares the tool's process."""
+    now = time.monotonic()
+    with _PENDING_LOCK:
+        for entry, added_at in list(_PENDING.items()):
+            if now - added_at >= FRESH_BOT_S:
+                del _PENDING[entry]
+        _PENDING[(str(get_hermes_home()), str(bot_id))] = now
 
 
 def _key() -> str:
@@ -103,17 +110,14 @@ def addressed(text: str, name: str) -> Optional[str]:
     return None
 
 
-def _created_epoch(record: dict) -> float:
-    value = api.field(record, "created_at", "CreatedAt")
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _float_setting(extra: dict, key: str, default: float) -> float:
     try:
-        return float(extra[key]) if extra.get(key) is not None else default
+        if extra.get(key) is None:
+            return default
+        value = float(extra[key])
+        if math.isfinite(value):
+            return value
+        raise ValueError
     except (TypeError, ValueError):
         logger.warning("[meetstream] platforms.meetstream.extra.%s=%r is not a number; using %s",
                        key, extra.get(key), default)
@@ -127,6 +131,7 @@ class _Watch:
     seeded: bool = False  # existing chat already marked seen (or there is none worth skipping)
     checked_at: float = 0.0
     failures: int = 0
+    retry_at: float = 0.0
     seen: set[str] = dc_field(default_factory=set)
 
 
@@ -144,6 +149,9 @@ class MeetStreamAdapter(BasePlatformAdapter):
         self._bots: dict[str, _Watch] = {}
         self._sent: dict[str, list[str]] = {}
         self._bot_name = "Hermes"
+        self._profile_home = str(get_hermes_home())
+        self._started_at = time.time()
+        self._discovery_retry_at = float("-inf")
         self._discovered_at = float("-inf")  # discover on the first tick (monotonic() can be < 120 s after boot)
         self._dedup = MessageDeduplicator(max_size=5000, ttl_seconds=6 * 3600)
 
@@ -159,7 +167,13 @@ class MeetStreamAdapter(BasePlatformAdapter):
         if not _key():
             logger.warning("[%s] %s is not set", self.name, KEY_ENV)
             return False
+        if self._task and not self._task.done():
+            return True
+        if self._client:
+            await self._client.aclose()
         self._client = api.new_client()
+        self._started_at = time.time()
+        self._discovered_at = self._discovery_retry_at = float("-inf")
         self._task = asyncio.create_task(self._run())
         self._mark_connected()
         self._wire_plugin_handlers(None)
@@ -196,7 +210,7 @@ class MeetStreamAdapter(BasePlatformAdapter):
                 return
             except api.MeetStreamError as e:
                 if e.status in (401, 403):
-                    # Only the account-wide calls (discovery) reach here; a per-bot 403 is handled per bot.
+                    # A per-bot 403 is handled per bot; 401 means this profile's key stopped working.
                     self._set_fatal_error("meetstream_unauthorized",
                                           f"MeetStream rejected the API key ({e.status}). Check {KEY_ENV}.",
                                           retryable=False)
@@ -215,42 +229,56 @@ class MeetStreamAdapter(BasePlatformAdapter):
         from .meetstream_tools import settings
 
         self._bot_name = str(settings()["bot_name"]).strip() or "Hermes"
-        while _PENDING:
-            bot_id, _ = _PENDING.popitem()
-            self._bots.setdefault(bot_id, _Watch(bot_id, seeded=True))
         now = time.monotonic()
-        if self._discovery and now - self._discovered_at >= self._discovery:
-            self._discovered_at = now
-            await self._discover()
+        with _PENDING_LOCK:
+            for entry, added_at in list(_PENDING.items()):
+                profile, bot_id = entry
+                if now - added_at >= FRESH_BOT_S:
+                    del _PENDING[entry]
+                elif profile == self._profile_home:
+                    del _PENDING[entry]
+                    self._bots.setdefault(bot_id, _Watch(bot_id, seeded=True))
+
+        if self._discovery and now >= self._discovery_retry_at and now - self._discovered_at >= self._discovery:
+            try:
+                await self._discover()
+            except api.MeetStreamError as e:
+                if e.status in (401, 403):
+                    raise
+                self._discovery_retry_at = now + BACKOFF_S[-1]
+                logger.warning("[%s] Bot discovery failed (status %s); keeping existing watches", self.name, e.status)
+            else:
+                self._discovered_at = now
         for watch_ in list(self._bots.values()):
+            if now < watch_.retry_at:
+                continue
             try:
                 await self._poll_bot(watch_)
                 watch_.failures = 0
             except (api.MeetStreamError, ValueError) as e:
-                watch_.failures += 1
-                logger.warning("[%s] Bot %s: %s", self.name, watch_.bot_id, e)
-                if watch_.failures >= MAX_BOT_FAILURES or getattr(e, "status", 0) in (403, 404):
-                    logger.info("[%s] No longer watching bot %s", self.name, watch_.bot_id)
+                status = getattr(e, "status", 0)
+                if status == 401:
+                    raise
+                logger.warning("[%s] Bot %s poll failed (status %s)", self.name, watch_.bot_id, status)
+                if status in (403, 404) or isinstance(e, ValueError):
                     self._forget(watch_.bot_id)
+                else:
+                    watch_.failures += 1
+                    watch_.retry_at = now + BACKOFF_S[min(watch_.failures, len(BACKOFF_S)) - 1]
 
     async def _discover(self) -> None:
         since = (datetime.now(tz=UTC) - timedelta(days=1)).date().isoformat()
-        params: dict[str, Any] = {"from": since, "limit": 50}
-        for _ in range(MAX_LIST_PAGES):
-            data = await api.list_bots(self._client, _key(), params)
-            for record in data.get("bots") or []:
+        async for records, _ in api.bot_pages(self._client, _key(), {"from": since, "limit": 50}):
+            for record in records:
                 self._consider(record)
-            cursor = data.get("nextCursor")
-            if not data.get("hasNextPage") or not cursor:
-                break
-            params = {**params, "cursor": cursor}
 
     def _consider(self, record: dict) -> None:
         bot_id = str(api.field(record, "bot_id", "BotID", "id", default="") or "")
         status = api.norm_status(api.field(record, "status", "Status"))
-        if not bot_id or bot_id in self._bots or status in api.ENDED or not api.is_hermes_bot(record, self._bot_name):
+        if not bot_id or bot_id in self._bots or status in api.JOIN_FINISHED or not api.is_hermes_bot(record, self._bot_name):
             return
-        fresh = time.time() - _created_epoch(record) < FRESH_BOT_S
+        created = api.bot_created_at(record)
+        fresh = created >= self._started_at and time.time() - created < FRESH_BOT_S
         logger.info("[%s] Watching bot %s (%s)", self.name, bot_id, status or "unknown status")
         self._bots[bot_id] = _Watch(bot_id, status=status, seeded=fresh)
 
@@ -261,9 +289,10 @@ class MeetStreamAdapter(BasePlatformAdapter):
     async def _poll_bot(self, w: _Watch) -> None:
         now = time.monotonic()
         if not w.status or now - w.checked_at >= STATUS_REFRESH_S:
+            status = await api.bot_status(self._client, _key(), w.bot_id)
+            w.status = api.norm_status(api.field(status, "status", "Status"))
             w.checked_at = now
-            w.status = api.norm_status((await api.bot_status(self._client, _key(), w.bot_id)).get("status"))
-        if w.status in api.ENDED:
+        if w.status in api.JOIN_FINISHED:
             logger.info("[%s] Bot %s ended (%s); no longer watching", self.name, w.bot_id, w.status)
             self._forget(w.bot_id)
             return
@@ -294,7 +323,7 @@ class MeetStreamAdapter(BasePlatformAdapter):
 
     def _is_own(self, bot_id: str, sender: str, text: str) -> bool:
         own = normalize_name(self._bot_name)
-        if normalize_name(sender).startswith(own):  # "Hermes", "Hermes (Bot)", "Hermes 🤖"
+        if normalize_name(sender) in {own, f"{own} (bot)", f"{own} 🤖"}:
             return True
         body = normalize_name(text)
         return any(body == normalize_name(s) or (len(body) > 40 and normalize_name(s).startswith(body))
@@ -330,8 +359,8 @@ class MeetStreamAdapter(BasePlatformAdapter):
         sent = self._sent.setdefault(chat_id, [])
         try:
             for part in api.chunks(content):
-                sent.append(part)
                 await api.send_message(self._client, _key(), chat_id, part)
+                sent.append(part)
         except (api.MeetStreamError, ValueError) as e:
             return SendResult(success=False, error=getattr(e, "detail", str(e)))
         finally:

@@ -40,7 +40,7 @@ You set the other options in the MeetStream dashboard.
    Hermes keeps the key in the `.env` file of your profile.
 3. Start a new Hermes session.
 
-Before the plugin is in the Hermes catalog, use the repository address:
+For local development or a custom revision, use the repository address:
 
 ```bash
 hermes plugins install meetstream-ai/hermes-meetstream --enable
@@ -92,7 +92,7 @@ Do these steps one time:
    ```
 
 In the call, start a chat message with the bot name.
-Examples: "Hermes, what did we decide about the price?" or "@Hermes, give a summary of the last 10 minutes of chat."
+Examples: "Hermes, find the public docs for this API" or "@Hermes, summarize the discussion in this chat thread."
 Hermes answers in the chat.
 Hermes does not hear the call during the call.
 Hermes reads only the chat messages that start with its name, or that contain "@" and its name.
@@ -151,7 +151,9 @@ Set these items at <https://app.meetstream.ai>. You do not have to install Herme
   To make Hermes answer in these calls, set the default bot name to the Hermes bot name (default `Hermes`).
 - **Webhooks.** Get an event when a bot joins, leaves, or when a transcript is ready.
 - **Storage.** Keep the recordings in your own storage bucket.
-- **Signed-in bots.** Let the bot join calls that admit only signed-in users.
+- **Signed-in bots.** Use the MeetStream dashboard or API to dispatch signed-in bots. Direct joins
+  from this plugin do not request Google or Teams sign-in. For a guest bot in the waiting room,
+  admit it from the host account. Hermes can report `WaitingRoomTimeout` when nobody admits it.
 
 ## How the plugin works
 
@@ -168,18 +170,21 @@ Set these items at <https://app.meetstream.ai>. You do not have to install Herme
 ## Limits
 
 - The search reads the 200 most recent bots of the last day. On an account with more bots in one day, use `meetstream_join` to start Hermes bots.
-- If the gateway finds a bot more than 5 minutes after the bot started, Hermes does not answer the older chat messages.
-  The same occurs after a restart of the gateway. Ask the question again.
+- If the gateway finds a bot created before the gateway started, or more than 5 minutes after the
+  bot was created, it skips the existing chat history. Ask the question again after the gateway connects.
 
 ## Network calls and data
 
 The plugin sends requests only to the MeetStream API at `https://api.meetstream.ai`, with your API key.
 
-- The tools send a request only when Hermes uses a tool.
+- The tools send requests when Hermes uses them. Joining searches for a matching bot and sends a
+  hashed join target as a bot attribute and in an idempotency key. A transcript wait checks for
+  readiness every 15 seconds for up to 120 seconds per tool call.
 - While the gateway runs, the gateway searches for Hermes bots every 120 seconds.
   During a call, it reads the meeting chat every 5 seconds.
 - The plugin sends the meeting link, the bot name, the join message, and the chat answers of Hermes.
-  The plugin receives bot status, meeting chat, and transcripts.
+  The plugin receives bot status, meeting chat, and transcripts. Hermes sends retrieved transcript
+  text to its configured model provider when asked to produce notes.
 - MeetStream keeps recordings and transcripts as your MeetStream account settings tell it.
 - The plugin keeps no files on your computer, starts no shell commands, and sends no telemetry.
 - The plugin does not update itself.

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.meetstream.ai/api/v1"
 TIMEOUT_S = 20.0
+MAX_LIST_PAGES = 4
 MAX_CHAT = 2000  # send_message rejects longer bodies (SendMessageRequest.maxLength)
 JOIN_ATTR = "hermes_join_target"
 HERMES_ATTR = "hermes"  # custom attribute that marks a bot as one Hermes speaks through
@@ -27,11 +28,11 @@ HERMES_ATTR = "hermes"  # custom attribute that marks a bot as one Hermes speaks
 MEETING_HOSTS = ("zoom.us", "zoom.com", "meet.google.com", "teams.microsoft.com", "teams.live.com")
 
 # Bot lifecycle. Chat can be read and written only while the bot is in the call.
-CHAT_READY = frozenset({"inmeeting", "recording"})
+CHAT_READY = frozenset({"inmeeting", "recording", "recordingpermissionallowed"})
 ENDED = frozenset({"stopped", "kicked", "notallowed", "denied", "error", "done", "failed",
                    "cancelled", "removed", "mediaexpired"})
 JOIN_FINISHED = ENDED | {"mediaprocessing", "audioprocessing", "videoprocessing", "uploading", "transcriptionready"}
-JOIN_FAILED = frozenset({"notallowed", "denied", "error", "failed", "cancelled"})
+JOIN_FAILED = frozenset({"notallowed", "denied", "error", "failed", "cancelled", "recordingpermissiondenied"})
 
 TRANSCRIPTION_PROVIDERS = {
     "meetstream": {"meetstream": {"language": "auto", "translate": False}},
@@ -122,6 +123,17 @@ def norm_status(value: Any) -> str:
     return re.sub(r"[^a-z]", "", str(value or "").lower())
 
 
+def bot_created_at(record: dict) -> float:
+    value = field(record, "created_at", "CreatedAt")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        try:
+            return datetime.fromisoformat(str(value)).timestamp()
+        except (ValueError, OverflowError, OSError):
+            return 0.0
+
+
 def validate_meeting_url(url: str) -> str:
     """The meeting link rebuilt from its parsed parts, so the host checked here is the host the bot
     opens. Raises ``ValueError`` for anything that is not a plain https Zoom / Meet / Teams link."""
@@ -134,8 +146,9 @@ def validate_meeting_url(url: str) -> str:
         raise ValueError("meeting_url must be an https:// Zoom, Google Meet or Microsoft Teams link")
     if not any(host == h or host.endswith("." + h) for h in MEETING_HOSTS):
         raise ValueError(f"{host} is not a Zoom, Google Meet or Microsoft Teams host")
-    port = f":{parsed.port}" if parsed.port else ""
-    rebuilt = f"https://{host}{port}{parsed.path}"
+    if parsed.port not in (None, 443):
+        raise ValueError("Meeting links must use the standard HTTPS port")
+    rebuilt = f"https://{host}{parsed.path}"
     return rebuilt + (f"?{parsed.query}" if parsed.query else "") + (f"#{parsed.fragment}" if parsed.fragment else "")
 
 
@@ -145,7 +158,7 @@ _BOT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 def bot_path(bot_id: str, action: str = "") -> str:
     """``/bots/<id>[/action]`` for a well-formed bot id; ``ValueError`` otherwise (no path injection)."""
     bot_id = str(bot_id or "").strip()
-    if not _BOT_ID_RE.match(bot_id):
+    if not _BOT_ID_RE.fullmatch(bot_id):
         raise ValueError(f"invalid bot_id {bot_id[:40]!r}")
     return f"/bots/{bot_id}/{action}" if action else f"/bots/{bot_id}"
 
@@ -224,10 +237,8 @@ async def create_bot(client, key, payload: dict) -> dict:
     target = _join_target(payload)
     params = {f"custom_attr[{JOIN_ATTR}]": target, "limit": 50}
     previous: tuple[float, str] = (float("-inf"), "")
-    seen_cursors: set[str] = set()
-    while True:
-        data = await list_bots(client, key, params)
-        for record in data.get("bots") or []:
+    async for records, more in bot_pages(client, key, params):
+        for record in records:
             attrs = field(record, "custom_attributes", "CustomAttributes", default={})
             bot_id = field(record, "bot_id", "BotID")
             if not bot_id or not isinstance(attrs, dict) or attrs.get(JOIN_ATTR) != target:
@@ -235,28 +246,21 @@ async def create_bot(client, key, payload: dict) -> dict:
             status = field(record, "status", "Status")
             if norm_status(status) not in JOIN_FINISHED:
                 return {"bot_id": bot_id, "status": status, "reused": True}
-            created = field(record, "created_at", "CreatedAt", default=0)
-            try:
-                timestamp = float(created)
-            except (TypeError, ValueError):
-                try:
-                    timestamp = datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp()
-                except ValueError as e:
-                    raise MeetStreamError(0, "MeetStream returned an invalid bot creation timestamp") from e
-            previous = max(previous, (timestamp, str(bot_id)))
-        if not data.get("hasNextPage"):
-            break
-        cursor = data.get("nextCursor")
-        if not cursor or cursor in seen_cursors:
-            raise MeetStreamError(0, "MeetStream bot list did not provide a fresh cursor")
-        seen_cursors.add(cursor)
-        params = {**params, "cursor": cursor}
+            previous = max(previous, (bot_created_at(record), str(bot_id)))
+    if more:
+        raise MeetStreamError(0, "Could not verify whether a bot is already in this meeting. Try again later.")
 
     # Concurrent callers seeing the same prior bot use the same retry key. When that bot has
     # finished, its ID makes the next occurrence use a fresh key even for a recurring link.
     retry_key = f"hermes:{target}:{previous[1] or 'first'}"
     body = {**payload, "custom_attributes": {**payload["custom_attributes"], JOIN_ATTR: target}}
-    return await request(client, key, "POST", "/bots/create_bot", body=body, idempotency_key=retry_key)
+    for _ in range(MAX_LIST_PAGES):
+        result = await request(client, key, "POST", "/bots/create_bot", body=body, idempotency_key=retry_key)
+        if not result.get("reused") or norm_status(result.get("status")) not in JOIN_FINISHED:
+            return result
+        # The create endpoint can see an ended bot before it is visible in the list.
+        retry_key = f"hermes:{target}:{result['bot_id']}"
+    raise MeetStreamError(0, "MeetStream's bot list is catching up. Try the join again shortly.")
 
 
 async def bot_status(client, key, bot_id: str) -> dict:
@@ -269,6 +273,21 @@ async def bot_detail(client, key, bot_id: str) -> dict:
 
 async def list_bots(client, key, params: Optional[dict] = None) -> dict:
     return await request(client, key, "GET", "/bots", params=params)
+
+
+async def bot_pages(client, key, params: dict):
+    seen_cursors = set()
+    for _ in range(MAX_LIST_PAGES):
+        data = await list_bots(client, key, params)
+        more = bool(data.get("hasNextPage"))
+        yield [r for r in (data.get("bots") or []) if isinstance(r, dict)], more
+        if not more:
+            return
+        cursor = data.get("nextCursor")
+        if not cursor or cursor in seen_cursors:
+            raise MeetStreamError(0, "MeetStream bot list did not provide a fresh cursor")
+        seen_cursors.add(cursor)
+        params = {**params, "cursor": cursor}
 
 
 async def get_chats(client, key, bot_id: str) -> list[dict]:
@@ -293,14 +312,16 @@ async def transcript(client, key, bot_id: str) -> tuple[Optional[str], Any]:
         runs = (await request(client, key, "GET", bot_path(bot_id, "transcriptions"))).get("transcriptions") or []
         done = [r for r in runs if re.search(r"success|completed", str(r.get("status", "")), re.I)]
         tid = (done or runs or [{}])[0].get("transcript_id")
-    if not tid:
-        return None, None
-    if not _BOT_ID_RE.match(str(tid)):
-        raise MeetStreamError(0, "MeetStream returned a malformed transcript_id")
+    if tid:
+        if not _BOT_ID_RE.fullmatch(str(tid)):
+            raise MeetStreamError(0, "MeetStream returned a malformed transcript_id")
+        path = f"/transcript/{tid}/get_transcript"
+    else:
+        path = bot_path(bot_id, "get_transcript")
     try:
-        data = await request(client, key, "GET", f"/transcript/{tid}/get_transcript", transcript_pending=True)
+        data = await request(client, key, "GET", path, transcript_pending=True)
     except MeetStreamError as e:
-        if e.status in (400, 404):
+        if e.status == 404:
             return tid, None
         raise
     segments = data.get("message") if isinstance(data, dict) and isinstance(data.get("message"), list) else data

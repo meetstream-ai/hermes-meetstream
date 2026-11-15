@@ -14,11 +14,9 @@ accounts. Two layers, both on public plugin surfaces:
 
 from __future__ import annotations
 
-import logging
 from collections import OrderedDict
+from threading import Lock
 from typing import Any, Optional
-
-logger = logging.getLogger(__name__)
 
 PLATFORM = "meetstream"
 MEETING_TOOLSETS = ["web", "no_mcp"]  # "no_mcp" is Hermes' sentinel for "no MCP servers"
@@ -27,17 +25,17 @@ _MAX_TRACKED = 50_000  # far above concurrent meeting sessions; each hit refresh
 
 # session_id / task_id of agent turns that run for meeting chat (bounded, oldest dropped first).
 _MEETING_IDS: "OrderedDict[str, None]" = OrderedDict()
+_MEETING_LOCK = Lock()
 
 
 def _remember(*ids: str) -> None:
-    for value in ids:
-        if value:
-            _MEETING_IDS[value] = None
-            _MEETING_IDS.move_to_end(value)
-    while len(_MEETING_IDS) > _MAX_TRACKED:
-        dropped, _ = _MEETING_IDS.popitem(last=False)
-        logger.warning("[meetstream] Dropped the oldest tracked meeting session %s (cap %d); the toolset "
-                       "override still applies to it", dropped[:12], _MAX_TRACKED)
+    with _MEETING_LOCK:
+        for value in ids:
+            if value:
+                _MEETING_IDS[value] = None
+                _MEETING_IDS.move_to_end(value)
+        while len(_MEETING_IDS) > _MAX_TRACKED:
+            _MEETING_IDS.popitem(last=False)
 
 
 def _is_meetstream(platform: Any) -> bool:
@@ -47,10 +45,11 @@ def _is_meetstream(platform: Any) -> bool:
 
 
 def is_meeting_turn(session_id: str = "", task_id: str = "") -> bool:
-    hits = [value for value in (session_id, task_id) if value and value in _MEETING_IDS]
-    for value in hits:
-        _MEETING_IDS.move_to_end(value)  # an active meeting session never ages out
-    return bool(hits)
+    with _MEETING_LOCK:
+        hits = [value for value in (session_id, task_id) if value and value in _MEETING_IDS]
+        for value in hits:
+            _MEETING_IDS.move_to_end(value)
+        return bool(hits)
 
 
 def on_pre_llm_call(session_id: str = "", task_id: str = "", platform: str = "", **_: Any) -> None:

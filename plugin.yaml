@@ -1,7 +1,7 @@
 name: meetstream
 label: Hermes in Meetings
 kind: platform
-version: 0.2.0
+version: 0.3.0
 requires_hermes: ">=0.23.0"
 author: MeetStream
 description: >
@@ -55,4 +55,4 @@ config_schema:
     type: str
     default: ""
     label: "Join message"
-    description: "Chat message posted when the bot joins. {name} is replaced by the bot name. Empty: a short introduction."
+    description: "Optional chat text after the recording notice. {name} is replaced by the bot name."
