@@ -49,6 +49,9 @@ class FakeMeetStream:
         self.bots: dict[str, dict] = {}
         self.sent: list[tuple[str, str]] = []
         self.created: list[dict] = []
+        self.join_keys: dict[str, str] = {}
+        self.hide_list = False
+        self.transcript_responses: list[httpx.Response] = []
         self.requests: list[httpx.Request] = []
         self.reject_key = False
         self.page_size = 50
@@ -75,13 +78,24 @@ class FakeMeetStream:
         parts = path.strip("/").split("/")
         if path == "/bots/create_bot":
             body = json.loads(request.content)
+            retry_key = request.headers.get("Idempotency-Key")
+            if retry_key in self.join_keys:
+                bot_id = self.join_keys[retry_key]
+                return httpx.Response(507, json={"bot_id": bot_id, "status": self.bots[bot_id]["status"]})
             self.created.append(body)
-            self.add_bot("bot-new", status="Joining")
-            return httpx.Response(201, json={"bot_id": "bot-new", "status": "Active",
+            bot_id = "bot-new" if len(self.created) == 1 else f"bot-new-{len(self.created)}"
+            self.add_bot(bot_id, status="Joining", attrs=body["custom_attributes"], age_s=0)
+            if retry_key:
+                self.join_keys[retry_key] = bot_id
+            return httpx.Response(201, json={"bot_id": bot_id, "status": "Active",
                                              "meeting_url": body["meeting_link"], "transcript_id": None})
+        if path == "/transcript/t1/get_transcript" and self.transcript_responses:
+            return self.transcript_responses.pop(0)
         if path == "/bots":
             rows = [{"bot_id": b, "status": v["status"], "bot_username": v["name"], "custom_attributes": v["attrs"],
                      "created_at": v["created_at"]} for b, v in self.bots.items()]
+            if self.hide_list:
+                rows = []
             start = int(request.url.params.get("cursor") or 0)
             page = rows[start:start + self.page_size]
             more = start + self.page_size < len(rows)
@@ -95,7 +109,11 @@ class FakeMeetStream:
         action = parts[2]
         if action == "status":
             return httpx.Response(200, json={"bot_id": parts[1], "status": bot["status"]})
+        if action == "detail":
+            return httpx.Response(200, json={"bot_details": bot.get("detail", {})})
         if action == "get_chats":
+            if "chat_error" in bot:
+                return httpx.Response(bot["chat_error"], json={"message": "Chat unavailable"})
             return httpx.Response(200, json={"chatMessages": bot["chats"]})
         if action == "send_message":
             text = json.loads(request.content)["message"]
@@ -197,8 +215,71 @@ class TestTools(PluginTestCase):
         body = self.fake.created[0]
         self.assertEqual(body["bot_name"], "Hermes")
         self.assertEqual(body["bot_message"], "Hi, I'm Hermes.")
-        self.assertEqual(body["custom_attributes"], {"hermes": True})
+        self.assertIs(body["custom_attributes"]["hermes"], True)
+        self.assertFalse(out["joined"])
         self.assertIn("bot-new", adapter_mod._PENDING)
+
+    def test_duplicate_join_reuses_bot_and_finished_call_can_rejoin_same_link(self):
+        url = "https://meet.google.com/abc-defg-hij"
+        first = json.loads(self.run_async(tools.handle_join({"meeting_url": url})))
+        self.fake.bots[first["bot_id"]]["status"] = "InWaitingRoom"
+        again = json.loads(self.run_async(tools.handle_join({"meeting_url": url + "?authuser=0"})))
+        self.assertTrue(again["reused"])
+        self.assertEqual(again["bot_id"], first["bot_id"])
+        self.assertEqual(again["status"], "InWaitingRoom")
+        self.assertEqual(len(self.fake.created), 1)
+
+        self.fake.bots[first["bot_id"]]["status"] = "MediaProcessing"
+        later = json.loads(self.run_async(tools.handle_join({"meeting_url": url})))
+        self.assertFalse(later["reused"])
+        self.assertNotEqual(later["bot_id"], first["bot_id"])
+        self.assertEqual(len(self.fake.created), 2)
+
+    def test_scheduled_occurrences_are_distinct_but_equivalent_times_reuse_the_bot(self):
+        url = "https://meet.google.com/abc-defg-hij"
+        times = ("2026-11-20T15:00:00Z", "2026-11-20T20:30:00+05:30", "2026-11-27T15:00:00Z")
+        outs = [json.loads(self.run_async(tools.handle_join({"meeting_url": url, "join_at": when})))
+                for when in times]
+        self.assertEqual(outs[0]["bot_id"], outs[1]["bot_id"])
+        self.assertNotEqual(outs[0]["bot_id"], outs[2]["bot_id"])
+        self.assertEqual(len(self.fake.created), 2)
+
+    def test_replayed_create_reuses_bot_when_it_is_not_visible_in_list(self):
+        self.fake.hide_list = True
+        args = {"meeting_url": "https://meet.google.com/abc-defg-hij"}
+        outs = [json.loads(self.run_async(tools.handle_join(args))) for _ in range(2)]
+        self.assertEqual([out["bot_id"] for out in outs], ["bot-new", "bot-new"])
+        self.assertTrue(outs[1]["reused"])
+        self.assertEqual(len(self.fake.created), 1)
+
+    def test_status_includes_join_failure_reason(self):
+        self.fake.add_bot("b1", status="FAILED")
+        self.fake.bots["b1"]["detail"] = {"ErrorReason": "MeetingNotFound", "message": "Room could not be joined"}
+        out = json.loads(self.run_async(tools.handle_status({"bot_id": "b1"})))
+        self.assertEqual(out["status"], "FAILED")
+        self.assertEqual(out["error_reason"], "MeetingNotFound")
+
+    def test_transcript_after_host_removal_waits_for_ready_even_if_chat_fails(self):
+        self.fake.add_bot("b1", status="Kicked")
+        self.fake.bots["b1"].update(detail={"transcript_id": "t1"}, chat_error=404)
+        segments = [{"speaker": "Priya", "transcript": "I'll finish the edit Thursday."}]
+        self.fake.transcript_responses = [
+            httpx.Response(202, json={"message": "Still processing"}),
+            httpx.Response(200, json=segments),
+        ]
+        with mock.patch.object(tools, "TRANSCRIPT_POLL_SECONDS", 0):
+            out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1", "wait_seconds": 1})))
+        self.assertEqual(out["transcript_state"], "ready")
+        self.assertEqual(out["untrusted_meeting_content"]["transcript"], segments)
+        self.assertEqual(out["chat_status_code"], 404)
+
+    def test_http_202_returns_pending_without_transcript_content(self):
+        self.fake.add_bot("b1", status="MediaProcessing")
+        self.fake.bots["b1"]["detail"] = {"transcript_id": "t1"}
+        self.fake.transcript_responses = [httpx.Response(202, json={"message": "Still processing"})]
+        out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
+        self.assertEqual(out["transcript_state"], "pending")
+        self.assertIsNone(out["untrusted_meeting_content"]["transcript"])
 
     def test_join_refuses_bad_link_without_calling_meetstream(self):
         out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://example.com/meeting"})))

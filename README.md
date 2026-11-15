@@ -56,10 +56,23 @@ Tell Hermes what to do in plain words. Examples:
 - "Join my Zoom call at 3 PM today: https://zoom.us/j/123456789."
 - "Summarize the call and give me the action items with owners."
 
+A successful join request returns a bot ID while MeetStream connects. Ask Hermes for the status if you
+need to confirm that it got in. Repeating a join for a room with an active bot created by this version
+returns that bot. Reusing the room after the bot leaves can start a new bot.
+
 When the bot joins, it sends an introduction to the meeting chat.
 The introduction tells the people in the call that the bot records the call.
 If the host uses a waiting room, the host must admit the bot.
 The bot leaves when all the other people leave the call.
+
+## Get notes after the call
+
+Ask in your private Hermes chat: “Join this call and give me the decisions and action items when the
+transcript is ready.” On sessions that support background delegation, Hermes can wait for the
+transcript in that task and return notes to the originating chat. This also works when the host
+removes the bot. Processing can take a few minutes. Background polling is subject to Hermes's task
+limits and does not resume after the backend process restarts. You can also ask for the transcript
+or notes later using the bot ID.
 
 ## Ask Hermes questions during the call
 

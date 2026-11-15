@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -18,6 +20,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.meetstream.ai/api/v1"
 TIMEOUT_S = 20.0
 MAX_CHAT = 2000  # send_message rejects longer bodies (SendMessageRequest.maxLength)
+JOIN_ATTR = "hermes_join_target"
 HERMES_ATTR = "hermes"  # custom attribute that marks a bot as one Hermes speaks through
 
 # Meeting hosts MeetStream can join. Anything else is refused before a bot is billed.
@@ -25,7 +28,10 @@ MEETING_HOSTS = ("zoom.us", "zoom.com", "meet.google.com", "teams.microsoft.com"
 
 # Bot lifecycle. Chat can be read and written only while the bot is in the call.
 CHAT_READY = frozenset({"inmeeting", "recording"})
-ENDED = frozenset({"stopped", "notallowed", "denied", "error", "done", "failed", "cancelled", "removed"})
+ENDED = frozenset({"stopped", "kicked", "notallowed", "denied", "error", "done", "failed",
+                   "cancelled", "removed", "mediaexpired"})
+JOIN_FINISHED = ENDED | {"mediaprocessing", "audioprocessing", "videoprocessing", "uploading", "transcriptionready"}
+JOIN_FAILED = frozenset({"notallowed", "denied", "error", "failed", "cancelled"})
 
 TRANSCRIPTION_PROVIDERS = {
     "meetstream": {"meetstream": {"language": "auto", "translate": False}},
@@ -70,15 +76,28 @@ def _detail(resp: httpx.Response) -> str:
 
 
 async def request(client: httpx.AsyncClient, key: str, method: str, path: str, *,
-                  params: Optional[dict] = None, body: Optional[dict] = None) -> Any:
+                  params: Optional[dict] = None, body: Optional[dict] = None,
+                  idempotency_key: str = "", transcript_pending: bool = False) -> Any:
     if not key:
         raise MeetStreamError(0, "MEETSTREAM_API_KEY is not set (create one at https://app.meetstream.ai/api-key)")
     headers = {"Authorization": f"Token {key}", "Accept": "application/json"}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     try:
         resp = await client.request(method, path, params=params, json=body, headers=headers)
     except httpx.HTTPError as e:
         raise MeetStreamError(0, f"MeetStream unreachable: {type(e).__name__}") from e
     logger.debug("MeetStream %s %s -> %s", method, path, resp.status_code)
+    if transcript_pending and resp.status_code == 202:
+        return None
+    if idempotency_key and resp.status_code == 507:
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not data.get("bot_id"):
+            raise MeetStreamError(507, "MeetStream did not return the original bot ID")
+        return {**data, "reused": True}
     if resp.status_code >= 400:
         raise MeetStreamError(resp.status_code, _detail(resp))
     if not resp.content:
@@ -143,7 +162,13 @@ def build_join_payload(meeting_url: str, *, bot_name: str, message: str = "", jo
     if message:
         payload["bot_message"] = message[:MAX_CHAT]
     if join_at:
-        payload["join_at"] = join_at
+        try:
+            when = datetime.fromisoformat(join_at)
+            if when.utcoffset() is None:
+                raise ValueError
+        except ValueError as e:
+            raise ValueError("join_at must be an ISO-8601 time with a timezone") from e
+        payload["join_at"] = when.astimezone(UTC).isoformat().replace("+00:00", "Z")
     if image_url:
         payload["bot_image_url"] = image_url
     if transcription not in TRANSCRIPTION_PROVIDERS:
@@ -186,8 +211,52 @@ def is_hermes_bot(record: dict, bot_name: str) -> bool:
 
 # -- Endpoints -------------------------------------------------------------------------------------
 
+def _join_target(payload: dict) -> str:
+    url = payload["meeting_link"]
+    parsed = urlparse(url)
+    if parsed.netloc == "meet.google.com" and re.fullmatch(r"/[a-z]{3}-[a-z]{4}-[a-z]{3}/?", parsed.path):
+        # Google Meet's sharing and account-selection parameters do not change the room code.
+        url = f"https://meet.google.com{parsed.path.rstrip('/')}"
+    return sha256(f"{url}\n{payload.get('join_at', '')}".encode()).hexdigest()
+
+
 async def create_bot(client, key, payload: dict) -> dict:
-    return await request(client, key, "POST", "/bots/create_bot", body=payload)
+    target = _join_target(payload)
+    params = {f"custom_attr[{JOIN_ATTR}]": target, "limit": 50}
+    previous: tuple[float, str] = (float("-inf"), "")
+    seen_cursors: set[str] = set()
+    while True:
+        data = await list_bots(client, key, params)
+        for record in data.get("bots") or []:
+            attrs = field(record, "custom_attributes", "CustomAttributes", default={})
+            bot_id = field(record, "bot_id", "BotID")
+            if not bot_id or not isinstance(attrs, dict) or attrs.get(JOIN_ATTR) != target:
+                continue
+            status = field(record, "status", "Status")
+            if norm_status(status) not in JOIN_FINISHED:
+                return {"bot_id": bot_id, "status": status, "reused": True}
+            created = field(record, "created_at", "CreatedAt", default=0)
+            try:
+                timestamp = float(created)
+            except (TypeError, ValueError):
+                try:
+                    timestamp = datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp()
+                except ValueError as e:
+                    raise MeetStreamError(0, "MeetStream returned an invalid bot creation timestamp") from e
+            previous = max(previous, (timestamp, str(bot_id)))
+        if not data.get("hasNextPage"):
+            break
+        cursor = data.get("nextCursor")
+        if not cursor or cursor in seen_cursors:
+            raise MeetStreamError(0, "MeetStream bot list did not provide a fresh cursor")
+        seen_cursors.add(cursor)
+        params = {**params, "cursor": cursor}
+
+    # Concurrent callers seeing the same prior bot use the same retry key. When that bot has
+    # finished, its ID makes the next occurrence use a fresh key even for a recurring link.
+    retry_key = f"hermes:{target}:{previous[1] or 'first'}"
+    body = {**payload, "custom_attributes": {**payload["custom_attributes"], JOIN_ATTR: target}}
+    return await request(client, key, "POST", "/bots/create_bot", body=body, idempotency_key=retry_key)
 
 
 async def bot_status(client, key, bot_id: str) -> dict:
@@ -229,10 +298,10 @@ async def transcript(client, key, bot_id: str) -> tuple[Optional[str], Any]:
     if not _BOT_ID_RE.match(str(tid)):
         raise MeetStreamError(0, "MeetStream returned a malformed transcript_id")
     try:
-        data = await request(client, key, "GET", f"/transcript/{tid}/get_transcript")
+        data = await request(client, key, "GET", f"/transcript/{tid}/get_transcript", transcript_pending=True)
     except MeetStreamError as e:
         if e.status in (400, 404):
             return tid, None
         raise
     segments = data.get("message") if isinstance(data, dict) and isinstance(data.get("message"), list) else data
-    return tid, segments or None
+    return tid, segments
