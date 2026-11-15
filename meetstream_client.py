@@ -78,7 +78,7 @@ def _detail(resp: httpx.Response) -> str:
 
 async def request(client: httpx.AsyncClient, key: str, method: str, path: str, *,
                   params: Optional[dict] = None, body: Optional[dict] = None,
-                  idempotency_key: str = "", transcript_pending: bool = False) -> Any:
+                  idempotency_key: str = "", pending_as_none: bool = False) -> Any:
     if not key:
         raise MeetStreamError(0, "MEETSTREAM_API_KEY is not set (create one at https://app.meetstream.ai/api-key)")
     headers = {"Authorization": f"Token {key}", "Accept": "application/json"}
@@ -89,7 +89,7 @@ async def request(client: httpx.AsyncClient, key: str, method: str, path: str, *
     except httpx.HTTPError as e:
         raise MeetStreamError(0, f"MeetStream unreachable: {type(e).__name__}") from e
     logger.debug("MeetStream %s %s -> %s", method, path, resp.status_code)
-    if transcript_pending and resp.status_code == 202:
+    if pending_as_none and resp.status_code == 202:
         return None
     if idempotency_key and resp.status_code == 507:
         try:
@@ -179,9 +179,9 @@ def build_join_payload(meeting_url: str, *, bot_name: str, message: str = "", jo
             when = datetime.fromisoformat(join_at)
             if when.utcoffset() is None:
                 raise ValueError
-        except ValueError as e:
+            payload["join_at"] = when.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        except (ValueError, OverflowError) as e:
             raise ValueError("join_at must be an ISO-8601 time with a timezone") from e
-        payload["join_at"] = when.astimezone(UTC).isoformat().replace("+00:00", "Z")
     if image_url:
         payload["bot_image_url"] = image_url
     if transcription not in TRANSCRIPTION_PROVIDERS:
@@ -290,10 +290,14 @@ async def bot_pages(client, key, params: dict):
         params = {**params, "cursor": cursor}
 
 
-async def get_chats(client, key, bot_id: str) -> list[dict]:
-    data = await request(client, key, "GET", bot_path(bot_id, "get_chats"))
-    messages = data.get("chatMessages") if isinstance(data, dict) else None
-    return [m for m in (messages or []) if isinstance(m, dict)]
+async def get_chats(client, key, bot_id: str) -> list[dict] | None:
+    """Return None while MeetStream is still assembling the post-call chat artifact."""
+    data = await request(client, key, "GET", bot_path(bot_id, "get_chats"), pending_as_none=True)
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise MeetStreamError(0, "MeetStream returned an unexpected chat response")
+    return [m for m in (data.get("chatMessages") or []) if isinstance(m, dict)]
 
 
 async def send_message(client, key, bot_id: str, text: str) -> dict:
@@ -319,7 +323,7 @@ async def transcript(client, key, bot_id: str) -> tuple[Optional[str], Any]:
     else:
         path = bot_path(bot_id, "get_transcript")
     try:
-        data = await request(client, key, "GET", path, transcript_pending=True)
+        data = await request(client, key, "GET", path, pending_as_none=True)
     except MeetStreamError as e:
         if e.status == 404:
             return tid, None

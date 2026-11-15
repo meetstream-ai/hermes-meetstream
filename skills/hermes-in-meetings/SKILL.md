@@ -1,6 +1,6 @@
 ---
 name: hermes-in-meetings
-description: Join the user's Zoom, Google Meet or Microsoft Teams calls through a MeetStream bot, answer questions asked in the meeting chat, and do the follow-up work from the transcript. Use when the user asks you to join, sit in on, record, take notes on or summarize a meeting, or to post something in a call.
+description: Join the user's Zoom, Google Meet or Microsoft Teams calls through a MeetStream bot, post messages in the meeting chat, and do the follow-up work from the transcript. Use when the user asks you to join, sit in on, record, take notes on or summarize a meeting, or to post something in a call.
 version: 0.3.0
 metadata:
   hermes:
@@ -35,11 +35,10 @@ configured bot name (default "Hermes"), records it, and transcribes it.
    the bot is connecting. `InWaitingRoom` means the host can admit it. `InMeeting` or `Recording`
    or `RecordingPermissionAllowed` confirms admission. For a failed join, include the error reason
    and hint when supplied, and the bot ID.
-4. **During the call.** If the user's Hermes gateway runs, chat messages that start with the bot
-   name ("Hermes, what did we decide about pricing?") reach you as messages from that participant.
-   Answer in one short plain-text message. You cannot hear the call live; you see only the chat.
-   Only people on the user's allowlist reach you; others are ignored. In these turns you can only
-   search the web: every other tool is blocked, because a guest can copy an allowed display name.
+4. **During the call.** Use `meetstream_chat` to post messages that the user asked you to send.
+   The chat REST endpoint can stay pending until processing finishes. Do not promise live replies
+   or describe a pending chat as an empty one. If a live meeting-chat turn is available, only
+   web search tools are allowed and your reply is visible to participants.
 5. **Post-call notes.** If the user asks for notes or a summary after the call, start one
    background delegation from this private Hermes conversation as soon as you have the bot ID,
    where the current session supports background delegation and the child has the MeetStream
@@ -52,8 +51,9 @@ configured bot name (default "Hermes"), records it, and transcribes it.
    End on `ready`, `unavailable`, a definite tool error, or the task's limit. Return the
    requested summary to the parent conversation once the transcript is ready. A host removing
    the bot can start transcript processing even when people stay in the call. On a timeout
-   that's still `pending`, say that the transcript hasn't arrived and give the bot ID. Do not
-   write notes from missing transcript data. If the session can't run background delegation,
+   that's still `pending`, say that the transcript hasn't arrived and give the bot ID. If the
+   transcript is ready but empty, say there were no transcribed speech segments. Use available
+   chat as evidence only if relevant and label any resulting notes as based on chat. If the session can't run background delegation,
    explain that limitation and give the user the bot ID to fetch notes after the call.
 
 ## Rules

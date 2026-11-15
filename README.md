@@ -3,7 +3,7 @@
 Hermes in Meetings is a [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin from [MeetStream](https://meetstream.ai).
 With this plugin, Hermes can join your Zoom, Google Meet, and Microsoft Teams calls as a visible bot.
 The bot records and transcribes the call.
-During the call, the people in the call can ask Hermes a question in the meeting chat, and Hermes answers in the chat.
+During the call, you can ask Hermes to post a message through the bot.
 After the call, Hermes uses the transcript to write notes, action items, and follow-up messages.
 
 You must supply only one item: a MeetStream API key.
@@ -18,14 +18,14 @@ You set the other options in the MeetStream dashboard.
 | Tool | `meetstream_chat` | Sends a message to the meeting chat. |
 | Tool | `meetstream_transcript` | Gives the transcript and the meeting chat. |
 | Tool | `meetstream_leave` | Makes the bot leave the call. MeetStream keeps the data. |
-| Gateway platform | `meetstream` | Reads the meeting chat and sends the answers of Hermes to the chat. In meeting chat, Hermes can only search the web. |
+| Gateway platform | `meetstream` | Supports routing when chat is available during the call. The artifact endpoint can stay pending until the call ends. |
 | Skill | `meetstream:hermes-in-meetings` | Tells Hermes how to attend a call and how to do the follow-up work. |
 
 ## Requirements
 
 - Hermes Agent 0.23.0 or a later version.
 - A MeetStream account. Get an API key at <https://app.meetstream.ai/api-key>.
-- For answers in the meeting chat: the Hermes gateway must run during the call.
+- Posting a message in the call requires the bot to be admitted. The saved chat is available after processing.
 
 ## Install the plugin
 
@@ -74,31 +74,20 @@ removes the bot. Processing can take a few minutes. Background polling is subjec
 limits and does not resume after the backend process restarts. You can also ask for the transcript
 or notes later using the bot ID.
 
-## Ask Hermes questions during the call
+## Meeting chat
 
-Do these steps one time:
+From your private Hermes chat, ask Hermes to post a message using `meetstream_chat`. After the
+call, `meetstream_transcript` reports chat and transcript readiness separately.
 
-1. Write the names of the people who can ask questions in `MEETSTREAM_ALLOWED_USERS`.
-   Use the display names that the call shows, with a comma between two names.
+Live inbound Q&A depends on live chat delivery. The MeetStream REST chat endpoint can return
+HTTP 202 until the post-call manifest is processed, so the plugin does not promise live answers.
+For guaranteed live input, MeetStream provides
+[`participant_events.chat_message`](https://docs.meetstream.ai/guides/platforms/google-meet)
+through real-time endpoints. This release does not receive those events.
 
-   ```bash
-   hermes config set MEETSTREAM_ALLOWED_USERS "Sid Sivasubramanian,Nav"
-   ```
-
-2. Start the gateway:
-
-   ```bash
-   hermes gateway
-   ```
-
-In the call, start a chat message with the bot name.
-Examples: "Hermes, find the public docs for this API" or "@Hermes, summarize the discussion in this chat thread."
-Hermes answers in the chat.
-Hermes does not hear the call during the call.
-Hermes reads only the chat messages that start with its name, or that contain "@" and its name.
-
-If `MEETSTREAM_ALLOWED_USERS` is empty, Hermes does not answer in the chat.
-Hermes continues to record the call and to take notes.
+On deployments where chat is readable during the call, the adapter routes messages addressed
+to the configured bot name. The gateway must be running and the sender must be allowed by
+its configured display name. For example, `hermes config set MEETSTREAM_ALLOWED_USERS "Sid,Nav"`.
 
 ## Security
 
@@ -109,7 +98,9 @@ Hermes continues to record the call and to take notes.
   Use `MEETSTREAM_ALLOWED_USERS="*"` only for calls with people that you trust.
   MeetStream does not give a stable identifier for a participant. Thus, the plugin cannot do a better check.
 - **Hermes also accepts the names in `GATEWAY_ALLOWED_USERS`.** If that list contains a name, a meeting guest with that display name can ask Hermes questions.
-- **Hermes answers only in the calls of its own bots.** The gateway does not send messages to other bots of your account.
+- **The adapter discovers bots tagged `hermes: true` or using the configured bot name.**
+  If multiple Hermes profiles share one MeetStream account, the discovery markers can overlap.
+  Use separate MeetStream workspaces or run one chat gateway per workspace.
 ### Tools in meeting chat
 
 - **Meeting chat can only search the web.** A question in the meeting chat starts a Hermes turn with a fixed, small set of tools:
@@ -181,7 +172,7 @@ The plugin sends requests only to the MeetStream API at `https://api.meetstream.
   hashed join target as a bot attribute and in an idempotency key. A transcript wait checks for
   readiness every 15 seconds for up to 120 seconds per tool call.
 - While the gateway runs, the gateway searches for Hermes bots every 120 seconds.
-  During a call, it reads the meeting chat every 5 seconds.
+  During a call, it tries to read the chat every 5 seconds and backs off to 30 seconds if the artifact is pending.
 - The plugin sends the meeting link, the bot name, the join message, and the chat answers of Hermes.
   The plugin receives bot status, meeting chat, and transcripts. Hermes sends retrieved transcript
   text to its configured model provider when asked to produce notes.
@@ -195,8 +186,8 @@ Refer to <https://meetstream.ai/pricing>.
 ## Hermes in Meetings or the MeetStream connector
 
 Hermes also has a MeetStream connector in its MCP catalog (`hermes mcp install meetstream`).
-The connector gives all the tools of the MeetStream MCP server, but no answers in the meeting chat.
-Install one of the two, not the two together. If you install the two, Hermes gets two sets of meeting tools.
+The connector exposes the broader MeetStream MCP toolset. The plugin adds a meeting-specific
+skill and gateway adapter. Installing both gives Hermes two sets of meeting tools.
 
 ## Development
 

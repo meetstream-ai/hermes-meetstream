@@ -4,7 +4,8 @@ Outbound only. The adapter polls the MeetStream API; Hermes opens no port and ne
 - Discovery: bots this Hermes started (``meetstream_join`` hands them over at once) plus, every
   ``discovery_seconds``, the account's bots of the last day that are tagged ``hermes: true`` or carry
   the Hermes bot name, so a bot that MeetStream calendar auto-join sends under that name also gets Hermes.
-- Chat: while a bot is in the call, its chat is read every ``chat_poll_seconds``. A message is
+- Chat: while a bot is in the call, try to read its chat. The REST artifact can stay pending until
+  after the call, in which case the adapter cannot answer live. When available, a message is
   handed to the agent only when it starts with the bot name ("Hermes, ...") or @-mentions it.
 - Identity: ``user_id`` is the sender's display name, lower-cased. Participants choose their display
   names and MeetStream exposes no stable participant id, so ``MEETSTREAM_ALLOWED_USERS`` is a
@@ -132,6 +133,7 @@ class _Watch:
     checked_at: float = 0.0
     failures: int = 0
     retry_at: float = 0.0
+    chat_pending: bool = False
     seen: set[str] = dc_field(default_factory=set)
 
 
@@ -299,6 +301,14 @@ class MeetStreamAdapter(BasePlatformAdapter):
         if w.status not in api.CHAT_READY:
             return
         messages = await api.get_chats(self._client, _key(), w.bot_id)
+        if messages is None:
+            if not w.chat_pending:
+                logger.info("[%s] Chat artifact for bot %s is pending; live replies require live events",
+                            self.name, w.bot_id)
+            w.chat_pending = True
+            w.retry_at = now + STATUS_REFRESH_S
+            return
+        w.chat_pending = False
         if not w.seeded:
             w.seen.update(self._message_id(w.bot_id, m) for m in messages)
             w.seeded = True

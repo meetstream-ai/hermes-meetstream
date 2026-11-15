@@ -122,6 +122,8 @@ class FakeMeetStream:
         if action == "get_chats":
             if "chat_error" in bot:
                 return httpx.Response(bot["chat_error"], json={"message": "Chat unavailable"})
+            if bot.get("chat_pending"):
+                return httpx.Response(202, json="Manifest is still being processed. Current status: None")
             return httpx.Response(200, json={"chatMessages": bot["chats"]})
         if action == "transcriptions":
             return httpx.Response(200, json={"transcriptions": []})
@@ -321,6 +323,15 @@ class TestTools(PluginTestCase):
         self.assertEqual(out["transcript_state"], "pending")
         self.assertIsNone(out["untrusted_meeting_content"]["transcript"])
 
+    def test_empty_transcript_and_pending_chat_are_distinct(self):
+        self.fake.add_bot("b1", status="Done")
+        self.fake.bots["b1"].update(detail={"transcript_id": "t1"}, chat_pending=True)
+        self.fake.transcript_responses = [httpx.Response(200, json=[])]
+        out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
+        self.assertEqual(out["transcript_state"], "ready")
+        self.assertTrue(out["transcript_empty"])
+        self.assertEqual(out["chat_state"], "pending")
+
     def test_transcript_by_bot_id_reports_disabled_transcription(self):
         self.fake.add_bot("b1", status="Done")
         self.fake.transcript_responses = [httpx.Response(409, json={"message": "Transcription was not enabled"})]
@@ -489,6 +500,23 @@ class TestAdapter(PluginTestCase):
             self.fake.say("zoom", "Hermes Johnson", "Hermes, are you there?")
             await a._tick()
             a.handle_message.assert_awaited_once()
+            await a._client.aclose()
+        self.run_async(go())
+
+    def test_http_202_does_not_seed_history_and_slows_polling(self):
+        async def go():
+            a = self.make_adapter(discovery_seconds=0)
+            self.fake.add_bot("b1")
+            self.fake.say("b1", "Sid", "Hermes, are you there?")
+            self.fake.bots["b1"]["chat_pending"] = True
+            a._consider({"bot_id": "b1", "status": "InMeeting", "bot_username": "Hermes"})
+            await a._tick()
+            self.assertTrue(a._bots["b1"].chat_pending)
+            self.assertFalse(a._bots["b1"].seeded)
+            attempts = len(self.fake.requests)
+            await a._tick()
+            self.assertEqual(len(self.fake.requests), attempts)
+            a.handle_message.assert_not_awaited()
             await a._client.aclose()
         self.run_async(go())
 

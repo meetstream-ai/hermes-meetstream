@@ -6,10 +6,10 @@ requires_hermes: ">=0.23.0"
 author: MeetStream
 description: >
   Hermes in Meetings, powered by MeetStream. Hermes joins your Zoom, Google Meet and Microsoft Teams
-  calls as a visible bot, records and transcribes them, and does the follow-up work afterwards. While
-  the Hermes gateway runs, people in the call can ask Hermes a question in the meeting chat and it
-  answers there. Setup is one MeetStream API key; recording, calendar auto-join, webhooks and storage
-  are configured in the MeetStream dashboard.
+  calls as a visible bot, records and transcribes them, and does the follow-up work afterwards.
+  Hermes can post messages while the bot is in a call and retrieve the saved chat afterwards.
+  Setup uses a MeetStream API key. Workspace webhooks, calendar auto-join and storage are configured
+  in the MeetStream dashboard.
 provides_tools:
   - meetstream_join
   - meetstream_status
@@ -30,8 +30,8 @@ optional_env:
   - name: MEETSTREAM_ALLOWED_USERS
     description: >-
       Display names of the people who may ask Hermes questions in the meeting chat, comma-separated,
-      as they appear in the call (case-insensitive). Empty: nobody can; Hermes still records and
-      takes notes. Names are chosen by participants, so do not rely on this list for security.
+      as they appear in the call (case-insensitive). Hermes also applies its gateway-wide
+      authorization rules. Names are chosen by participants, so do not rely on this list for security.
     prompt: "Meeting participants who may ask Hermes questions (comma-separated names, or empty)"
     password: false
 config_schema:

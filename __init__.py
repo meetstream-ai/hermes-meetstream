@@ -1,7 +1,7 @@
 """Hermes in Meetings: MeetStream meeting bots for Hermes Agent.
 
-Tools to join Zoom / Google Meet / Teams calls and read their transcripts, a gateway platform that
-answers questions asked in the meeting chat, and the ``hermes-in-meetings`` skill.
+Tools to join Zoom / Google Meet / Teams calls and read their transcripts, a gateway platform for
+meeting chat when it is available, and the ``hermes-in-meetings`` skill.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ def register(ctx) -> None:
         check_fn=adapter.check_requirements, validate_config=adapter.validate_config,
         is_connected=adapter.is_connected, required_env=[adapter.KEY_ENV],
         install_hint="no extra packages; httpx ships with Hermes",
-        dashboard_description="Answer questions asked in the chat of Zoom, Google Meet and Teams calls.",
+        dashboard_description="Connect the MeetStream bot to the Hermes gateway. Live replies depend on live chat availability.",
         docs_url="https://github.com/meetstream-ai/hermes-meetstream#readme",
         allowed_users_env="MEETSTREAM_ALLOWED_USERS", allow_all_env="MEETSTREAM_ALLOW_ALL_USERS",
         max_message_length=adapter.api.MAX_CHAT, emoji="📞", pii_safe=False,
