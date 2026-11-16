@@ -1,7 +1,7 @@
 ---
 name: hermes-in-meetings
 description: Join, find, or schedule a named Zoom, Google Meet or Microsoft Teams call through MeetStream. Use when the user asks for a meeting from their calendar, decisions from a previous meeting, meeting notes, or a message in a call.
-version: 0.5.0
+version: 0.6.0
 metadata:
   hermes:
     tags: [meetings, zoom, google-meet, microsoft-teams, transcription, notes]
@@ -43,8 +43,9 @@ configured bot name (default "Hermes"), records it, and transcribes it.
    or describe a pending chat as an empty one. If a live meeting-chat turn is available, only
    web search tools are allowed and your reply is visible to participants.
 5. **Decision brief.** When the user asks for notes or a summary after the meeting, call
-   `meetstream_join` once with `decision_brief: true`. This needs a saved private Hermes chat,
-   transcription and the MeetStream gateway in that profile. Report the tool's brief status.
+   `meetstream_join` once with `decision_brief: true`. This needs a saved private Hermes chat or
+   an authorized Telegram or WhatsApp DM, transcription, and the MeetStream gateway in that profile.
+   Report the tool's brief status. Briefs always go back to the requesting chat, never a home channel.
    A queued brief arrives in the original conversation after transcription, even if that
    gateway stops and later restarts. The brief cites transcript timestamps and lists decisions,
    actions with owners and deadlines when stated, and open questions. A host removing the bot

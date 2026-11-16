@@ -81,6 +81,26 @@ restart, including after the host removes the bot, and writes one result to the 
 Open the original chat to read the brief once it is ready. Other chats and the meeting chat do not
 receive it. MeetStream may need a few minutes to process the transcript.
 
+### Get the brief on Telegram or WhatsApp
+
+Connect a native [Telegram](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram)
+or [WhatsApp](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/whatsapp) gateway
+adapter in the same Hermes profile. Use a private DM from an authorized account. Text your bot:
+“Join this call and send me the decisions and action items when it ends: https://meet.google.com/abc-defg-hij.”
+
+Hermes saves the brief to the original conversation and sends a phone notification there. It checks
+that the original sender is still authorized before sending. If the messaging connection is offline,
+delivery waits for it. A send without a reliable acknowledgement is recorded as unconfirmed in the
+bot status. The full brief stays in Hermes history so it can be retrieved without risking a duplicate
+DM. Long phone messages show an excerpt and point to the saved brief.
+
+This setup needs the Hermes gateway and your native messaging connection, plus the MeetStream API
+key. The brief worker checks only queued bots. While a bot is in the meeting it checks about once a
+minute, then about every 15 seconds while waiting for the transcript. If the Mac is asleep or the
+gateway is offline, the checks resume when it is available. There is no public listener to set up.
+A workspace webhook can notify a public service sooner, but MeetStream makes one delivery attempt,
+so an event-driven deployment still needs a catch-up path.
+
 ## Google Meet status GIFs
 
 Ask Hermes to show its status in the call, or enable **Google Meet status GIFs** in the plugin settings
@@ -227,8 +247,8 @@ The plugin uses your MeetStream API key at `https://api.meetstream.ai`. For requ
   The plugin receives bot status, meeting chat, and transcripts. Hermes sends retrieved transcript
   text to its configured model provider when asked to produce notes.
 - MeetStream keeps recordings and transcripts as your MeetStream account settings tell it.
-- For a requested brief, the gateway checks its bot and transcript about every 15 seconds while
-  the job is pending. It stores job metadata and temporarily stages the completed brief in
+- For a requested brief, the gateway polls the queued bot's status and transcript. It stores job
+  metadata, the private messaging destination when applicable, and temporarily stages the brief in
   `meetstream-briefs.sqlite3` in that Hermes profile. The final brief is stored in the originating
   Hermes chat history. Google Meet status GIFs send packaged artwork to MeetStream.
 - The plugin starts no shell commands and sends no telemetry.

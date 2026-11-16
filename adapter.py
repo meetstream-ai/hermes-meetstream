@@ -31,9 +31,9 @@ from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, profile_name_for_home
 
-from . import briefs, guard
+from . import briefs, guard, messaging
 from . import meetstream_client as api
 
 logger = logging.getLogger(__name__)
@@ -215,10 +215,14 @@ class MeetStreamAdapter(BasePlatformAdapter):
 
     # -- Poll loop ---------------------------------------------------------------------------------
 
+    def _brief_sender(self, origin: dict):
+        return messaging.resolve_sender(self.gateway_runner, origin, profile_name_for_home(self._profile_home))
+
     async def _run_briefs(self) -> None:
         while self._running:
             try:
-                await briefs.poll(Path(self._profile_home), self._client, _key(), self._llm)
+                await briefs.poll(Path(self._profile_home), self._client, _key(), self._llm,
+                                  self._brief_sender)
             except Exception as exc:
                 logger.warning("[%s] Brief worker paused: %s", self.name, type(exc).__name__)
             await asyncio.sleep(briefs.POLL_SECONDS)

@@ -15,10 +15,12 @@ from pathlib import Path
 from hermes_state import SessionDB
 
 from . import meetstream_client as api
+from . import messaging
 
 logger = logging.getLogger(__name__)
 LOCAL_SESSIONS = frozenset({"local", "desktop", "cli", "tui"})
 POLL_SECONDS = 15
+ACTIVE_POLL_SECONDS = 60
 MAX_SOURCE_CHARS = 10_000
 MAX_BATCHES = 20
 PROCESSING_TIMEOUT = 30 * 60
@@ -42,12 +44,16 @@ def meeting_status(state: str) -> str:
     }.get(state, "Awaiting status from MeetStream")
 
 
-def private_session(home: Path, session_id: str) -> bool:
+def session_source(home: Path, session_id: str) -> str | None:
     if not session_id or not (home / "state.db").is_file():
-        return False
+        return None
     with SessionDB(home / "state.db", read_only=True) as db:
         row = db.get_session(session_id)
-        return bool(row and row.get("source") in LOCAL_SESSIONS)
+        return row.get("source") if row else None
+
+
+def private_session(home: Path, session_id: str) -> bool:
+    return session_source(home, session_id) in LOCAL_SESSIONS
 
 
 class Briefs:
@@ -57,8 +63,13 @@ class Briefs:
 
     def prepare(self):
         self.path.touch(mode=0o600, exist_ok=True)
-        with self.db():
-            pass
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(briefs)")}
+            if "origin" not in columns:
+                db.execute("ALTER TABLE briefs ADD COLUMN origin TEXT")
+            if "send_started" not in columns:
+                db.execute("ALTER TABLE briefs ADD COLUMN send_started INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def db(self):
@@ -74,11 +85,16 @@ class Briefs:
         finally:
             connection.close()
 
-    def queue(self, bot_id: str, session_id: str, state: str, *, start_check: float | None = None) -> bool:
+    def queue(self, bot_id: str, session_id: str, state: str, *, start_check: float | None = None,
+              origin: dict | None = None) -> bool:
         due = max(time.time(), start_check or 0)
         with self.db() as db:
-            db.execute("INSERT OR IGNORE INTO briefs(bot_id, session_id, state, due) VALUES (?, ?, ?, ?)",
-                       (bot_id, session_id, state, due))
+            if origin:
+                db.execute("INSERT OR IGNORE INTO briefs(bot_id, session_id, state, due, origin) VALUES (?, ?, ?, ?, ?)",
+                           (bot_id, session_id, state, due, json.dumps(origin)))
+            else:
+                db.execute("INSERT OR IGNORE INTO briefs(bot_id, session_id, state, due) VALUES (?, ?, ?, ?)",
+                           (bot_id, session_id, state, due))
             return db.execute("SELECT session_id FROM briefs WHERE bot_id = ?", (bot_id,)).fetchone()[0] == session_id
 
     def status(self, bot_id: str, session_id: str) -> str | None:
@@ -111,27 +127,71 @@ class Briefs:
             db.execute("UPDATE briefs SET state = ?, delivered = 1, brief = NULL WHERE bot_id = ?",
                        (state, bot_id))
 
-    def retry_delivery(self, bot_id: str):
+    def retry_delivery(self, bot_id: str, state: str | None = None):
         with self.db() as db:
-            db.execute("UPDATE briefs SET due = ? WHERE bot_id = ? AND delivered = 0 AND brief IS NOT NULL",
-                       (time.time() + POLL_SECONDS, bot_id))
+            db.execute("""UPDATE briefs SET due = ?, state = COALESCE(?, state)
+                          WHERE bot_id = ? AND delivered = 0 AND brief IS NOT NULL""",
+                       (time.time() + POLL_SECONDS, state, bot_id))
 
-    def deliver(self, row: dict, text: str):
+    def claim_message(self, bot_id: str) -> bool:
+        with self.db() as db:
+            return db.execute("""UPDATE briefs SET send_started = 1, state = 'Sending to the original chat'
+                               WHERE bot_id = ? AND delivered = 0 AND send_started = 0""",
+                              (bot_id,)).rowcount == 1
+
+    def finish_message(self, bot_id: str, state: str) -> None:
+        with self.db() as db:
+            db.execute("UPDATE briefs SET state = ?, delivered = 1, brief = NULL, origin = NULL WHERE bot_id = ?",
+                       (state, bot_id))
+
+    def save_to_history(self, row: dict, text: str, *, allowed=LOCAL_SESSIONS) -> bool:
         if not (self.home / "state.db").is_file():
-            self.finish(row["bot_id"], "Original private chat unavailable")
-            return
+            return False
         with SessionDB(self.home / "state.db") as db:
             destination = db.get_compression_tip(row["session_id"]) or row["session_id"]
             session = db.get_session(destination)
-            if not session or session.get("source") not in LOCAL_SESSIONS:
-                self.finish(row["bot_id"], "Original private chat unavailable")
-                return
+            if not session or session.get("source") not in allowed:
+                return False
             # Hermes checks this admission ID and appends the history row in one transaction.
             db.append_completion_note(
                 destination, "meetstream:brief:" + row["bot_id"], text, "process_complete",
                 {"display_text": "MeetStream decision brief"},
             )
-        self.finish(row["bot_id"], "Result posted to this chat")
+        return True
+
+    def deliver(self, row: dict, text: str):
+        saved = self.save_to_history(row, text)
+        self.finish(row["bot_id"], "Result posted to this chat" if saved else "Original private chat unavailable")
+
+
+async def deliver(store: Briefs, row: dict, text: str, resolve_sender) -> None:
+    if not row.get("origin"):
+        await asyncio.to_thread(store.deliver, row, text)
+        return
+    bot_id = row["bot_id"]
+    origin = json.loads(row["origin"])
+    if row.get("send_started"):
+        await asyncio.to_thread(store.finish_message, bot_id, "Delivery unconfirmed · brief saved in Hermes history")
+        return
+    saved = await asyncio.to_thread(store.save_to_history, row, text, allowed={origin["platform"]})
+    if not saved:
+        await asyncio.to_thread(store.finish_message, bot_id, "Original private chat unavailable")
+        return
+    try:
+        sender = resolve_sender(origin) if resolve_sender else None
+    except PermissionError:
+        await asyncio.to_thread(store.finish_message, bot_id, "DM permission revoked · brief saved in Hermes history")
+        return
+    if sender is None:
+        await asyncio.to_thread(store.retry_delivery, bot_id, "Waiting for the original messaging connection")
+        return
+    if not await asyncio.to_thread(store.claim_message, bot_id):
+        return
+    # A provider may accept a message even if its acknowledgement is lost. Never replay an uncertain send.
+    result = await sender(messaging.one_message(text))
+    outcome = ("Result posted to this chat" if result.success else
+               "Delivery unconfirmed · brief saved in Hermes history")
+    await asyncio.to_thread(store.finish_message, bot_id, outcome)
 
 
 def seconds(value) -> int | None:
@@ -289,10 +349,10 @@ async def summarize(llm, segments: list) -> str:
     return "\n".join(lines)
 
 
-async def advance(store: Briefs, row: dict, client, key: str, llm):
+async def advance(store: Briefs, row: dict, client, key: str, llm, resolve_sender=None):
     bot_id = row["bot_id"]
     if row["brief"] is not None:
-        await asyncio.to_thread(store.deliver, row, row["brief"])
+        await deliver(store, row, row["brief"], resolve_sender)
         return
     try:
         status = await api.bot_status(client, key, bot_id)
@@ -305,7 +365,7 @@ async def advance(store: Briefs, row: dict, client, key: str, llm):
         content = ("## Decision brief unavailable\n\n"
                    f"MeetStream status: {inline(str(api.field(status, 'status', 'Status', default=state)), 100)}.")
     elif state not in api.JOIN_FINISHED and state not in api.JOIN_FAILED:
-        await asyncio.to_thread(store.defer, bot_id, meeting_status(state))
+        await asyncio.to_thread(store.defer, bot_id, meeting_status(state), ACTIVE_POLL_SECONDS)
         return
     else:
         try:
@@ -327,16 +387,16 @@ async def advance(store: Briefs, row: dict, client, key: str, llm):
                 content = await summarize(llm, segments)
     brief = await asyncio.to_thread(store.save, bot_id, content)
     if brief is not None:
-        await asyncio.to_thread(store.deliver, row, brief)
+        await deliver(store, row, brief, resolve_sender)
 
 
-async def poll(home: Path, client, key: str, llm):
+async def poll(home: Path, client, key: str, llm, resolve_sender=None):
     store = Briefs(home)
     if not store.path.is_file():
         return
     for row in await asyncio.to_thread(store.due):
         try:
-            await advance(store, row, client, key, llm)
+            await advance(store, row, client, key, llm, resolve_sender)
         except Exception as exc:
             logger.warning("Decision brief %s paused: %s", row["bot_id"], type(exc).__name__)
             reason = "Waiting to retry"

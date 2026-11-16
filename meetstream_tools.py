@@ -12,7 +12,7 @@ from typing import Any
 from agent.secret_scope import get_secret
 from hermes_constants import get_hermes_home
 
-from . import briefs, calendar_events as calendar
+from . import briefs, calendar_events as calendar, messaging
 from . import meetstream_client as api
 
 PLUGIN_ID = "meetstream"
@@ -88,7 +88,7 @@ JOIN_SCHEMA = _schema(
      "message": {"type": "string", "description": "Optional text added after the bot's recording notice."},
      "meeting_title": {"type": "string", "description": "Optional title supplied by the user, for later search."},
      "decision_brief": {"type": "boolean", "description": "Set true for requested automatic notes or summary. "
-                        "Delivers one private timestamped decision brief after the call."},
+                        "Delivers a timestamped decision brief to the original private Hermes, Telegram or WhatsApp chat."},
      "status_gifs": {"type": "boolean", "description": "Show Hermes status animations on its Google Meet tile. "
                      "Defaults to the plugin setting."}},
     ["meeting_url"])
@@ -171,8 +171,13 @@ async def _join(args: dict, session_id: str, s: dict, event: calendar.Event | No
     try:
         if want_brief and transcription == "none":
             raise ValueError("Enable a transcription provider before requesting an automatic decision brief.")
-        if want_brief and not await asyncio.to_thread(briefs.private_session, home, session_id):
-            raise ValueError("Automatic decision briefs require a saved private Hermes Desktop or terminal chat.")
+        origin = None
+        if want_brief:
+            source = await asyncio.to_thread(briefs.session_source, home, session_id)
+            if source not in briefs.LOCAL_SESSIONS:
+                origin = messaging.capture_origin(session_id, source)
+                if not origin:
+                    raise ValueError("Automatic decision briefs require a saved private Hermes chat or an authorized Telegram or WhatsApp DM.")
         ledger = briefs.Briefs(home) if want_brief else None
         if ledger:
             await asyncio.to_thread(ledger.prepare)
@@ -206,7 +211,7 @@ async def _join(args: dict, session_id: str, s: dict, event: calendar.Event | No
     if ledger:
         try:
             queued = await asyncio.to_thread(ledger.queue, str(bot_id), session_id, briefs.meeting_status(state),
-                                             start_check=event.start.timestamp() - 120 if event else None)
+                                             start_check=event.start.timestamp() - 120 if event else None, origin=origin)
             brief_info["decision_brief"] = (
                 "Queued for this chat after the transcript is ready." if queued
                 else "This bot already has a destination for its brief."
