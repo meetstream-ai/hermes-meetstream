@@ -1,7 +1,7 @@
 name: meetstream
 label: Hermes in Meetings
 kind: platform
-version: 0.3.0
+version: 0.4.0
 requires_hermes: ">=0.23.0"
 author: MeetStream
 description: >
@@ -56,3 +56,8 @@ config_schema:
     default: ""
     label: "Join message"
     description: "Optional chat text after the recording notice. {name} is replaced by the bot name."
+  status_gifs:
+    type: bool
+    default: false
+    label: "Google Meet status GIFs"
+    description: "Show Hermes activity on its Google Meet tile for newly joined calls."

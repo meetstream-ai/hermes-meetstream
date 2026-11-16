@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from agent.secret_scope import get_secret
+from hermes_constants import get_hermes_home
 
+from . import briefs
 from . import meetstream_client as api
 
 PLUGIN_ID = "meetstream"
@@ -19,6 +23,7 @@ DEFAULTS = {
     "bot_name": "Hermes",
     "transcription": "meetstream",
     "join_message": "",
+    "status_gifs": False,
 }
 
 
@@ -79,7 +84,11 @@ JOIN_SCHEMA = _schema(
     "Only join calls the user asked you to join.",
     {"meeting_url": {"type": "string", "description": "Full https meeting link (zoom.us, meet.google.com, teams.microsoft.com)."},
      "join_at": {"type": "string", "description": "Optional ISO-8601 time to join later, e.g. 2026-11-13T15:00:00Z. Omit to join now."},
-     "message": {"type": "string", "description": "Optional text added after the bot's recording notice."}},
+     "message": {"type": "string", "description": "Optional text added after the bot's recording notice."},
+     "decision_brief": {"type": "boolean", "description": "Set true for requested automatic notes or summary. "
+                        "Delivers one private timestamped decision brief after the call."},
+     "status_gifs": {"type": "boolean", "description": "Show Hermes status animations on its Google Meet tile. "
+                     "Defaults to the plugin setting."}},
     ["meeting_url"])
 
 STATUS_SCHEMA = _schema(
@@ -114,7 +123,7 @@ LEAVE_SCHEMA = _schema(
     {"bot_id": _BOT_ID}, ["bot_id"])
 
 
-async def handle_join(args: dict, **_: Any) -> str:
+async def handle_join(args: dict, *, session_id: str = "", **_: Any) -> str:
     from . import adapter
 
     s = settings()
@@ -124,23 +133,53 @@ async def handle_join(args: dict, **_: Any) -> str:
     notice = f"Hi, I'm {name}, an AI assistant. I'm {recording} this call for my user."
     extra_message = str(args.get("message") or s["join_message"]).strip()
     message = f"{notice} {extra_message.replace('{name}', name)}" if extra_message else notice
+    want_brief = args.get("decision_brief") is True
+    home = get_hermes_home()
     try:
+        if want_brief and transcription == "none":
+            raise ValueError("Enable a transcription provider before requesting an automatic decision brief.")
+        if want_brief and not await asyncio.to_thread(briefs.private_session, home, session_id):
+            raise ValueError("Automatic decision briefs require a saved private Hermes Desktop or terminal chat.")
+        ledger = briefs.Briefs(home) if want_brief else None
+        if ledger:
+            await asyncio.to_thread(ledger.prepare)
         payload = api.build_join_payload(str(args.get("meeting_url") or ""), bot_name=name, message=message,
                                          join_at=str(args.get("join_at") or ""), transcription=transcription)
+        gif_enabled = (args.get("status_gifs", s.get("status_gifs")) is True
+                       and urlparse(payload["meeting_link"]).hostname == "meet.google.com")
+        if gif_enabled:
+            payload["custom_attributes"][api.GIF_ATTR] = True
         async with api.new_client() as client:
             data = await api.create_bot(client, api_key(), payload)
-    except (ValueError, api.MeetStreamError) as e:
+    except (ValueError, OSError, sqlite3.Error, api.MeetStreamError) as e:
         return _err(e)
     bot_id = api.field(data, "bot_id")
     if not bot_id:
         return _err(api.MeetStreamError(0, "MeetStream did not return a bot ID. The join could not be confirmed."))
     status = api.field(data, "status")
     state = api.norm_status(status)
+    reused = bool(data.get("reused"))
+    if reused:
+        attrs = data.get("custom_attributes")
+        gif_enabled = isinstance(attrs, dict) and attrs.get(api.GIF_ATTR) is True
     if state not in api.JOIN_FINISHED:
-        adapter.watch(bot_id)
+        adapter.watch(bot_id, status_gifs=gif_enabled)
+    brief_info = {}
+    if ledger:
+        try:
+            queued = await asyncio.to_thread(ledger.queue, str(bot_id), session_id, briefs.meeting_status(state))
+            brief_info["decision_brief"] = (
+                "Queued for this chat after the transcript is ready." if queued
+                else "This bot already has a destination for its brief."
+            )
+        except (OSError, sqlite3.Error):
+            brief_info["decision_brief"] = "Could not save delivery for this bot. Retry with the same meeting link."
     return _ok({
+        **brief_info,
+        "meeting_status": briefs.meeting_status(state),
+        "status_gifs": gif_enabled,
         "bot_id": bot_id, "status": status, "meeting_url": api.field(data, "meeting_url") or payload["meeting_link"],
-        "bot_name": name, "reused": bool(data.get("reused")),
+        "bot_name": name, "reused": reused,
         "joined": state in api.CHAT_READY,
         **({"transcription_requested": transcription != "none"} if not data.get("reused") else {}),
         "next": "Check meetstream_status for the actual join outcome. Active means the request was accepted, "
@@ -148,7 +187,7 @@ async def handle_join(args: dict, **_: Any) -> str:
     })
 
 
-async def handle_status(args: dict, **_: Any) -> str:
+async def handle_status(args: dict, *, session_id: str = "", **_: Any) -> str:
     bot_id = str(args.get("bot_id") or "").strip()
     try:
         async with api.new_client() as client:
@@ -156,6 +195,15 @@ async def handle_status(args: dict, **_: Any) -> str:
                 key = api_key()
                 status = await api.bot_status(client, key, bot_id)
                 state = api.norm_status(api.field(status, "status", "Status"))
+                status["meeting_status"] = briefs.meeting_status(state)
+                try:
+                    saved = await asyncio.to_thread(briefs.Briefs(get_hermes_home()).status, bot_id, session_id)
+                except (OSError, sqlite3.Error):
+                    saved = None
+                if saved:
+                    status["decision_brief_status"] = (
+                        "Queued · waiting for the recording to end" if state in api.CHAT_READY else saved
+                    )
                 if state in api.JOIN_FAILED or state in api.JOIN_FINISHED:
                     try:
                         detail = await api.bot_detail(client, key, bot_id)
@@ -184,6 +232,7 @@ async def handle_status(args: dict, **_: Any) -> str:
             bots = []
             async for records, more in api.bot_pages(client, api_key(), {"from": since, "limit": 50}):
                 bots.extend({"bot_id": api.field(b, "bot_id", "BotID"), "status": api.field(b, "status", "Status"),
+                             "meeting_status": briefs.meeting_status(api.norm_status(api.field(b, "status", "Status"))),
                              "platform": api.field(b, "platform", "Platform"),
                              "meeting_url": api.field(b, "meeting_url", "MeetingURL", "MeetingLink"),
                              "created_at": api.field(b, "created_at", "CreatedAt")}

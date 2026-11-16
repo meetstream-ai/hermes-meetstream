@@ -18,7 +18,7 @@ You set the other options in the MeetStream dashboard.
 | Tool | `meetstream_chat` | Sends a message to the meeting chat. |
 | Tool | `meetstream_transcript` | Gives the transcript and the meeting chat. |
 | Tool | `meetstream_leave` | Makes the bot leave the call. MeetStream keeps the data. |
-| Gateway platform | `meetstream` | Supports routing when chat is available during the call. The artifact endpoint can stay pending until the call ends. |
+| Gateway platform | `meetstream` | Delivers decision briefs and shows Google Meet status GIFs. Routes live replies when meeting chat is available. |
 | Skill | `meetstream:hermes-in-meetings` | Tells Hermes how to attend a call and how to do the follow-up work. |
 
 ## Requirements
@@ -65,14 +65,26 @@ The introduction tells the people in the call that the bot records the call.
 If the host uses a waiting room, the host must admit the bot.
 The bot leaves when all the other people leave the call.
 
-## Get notes after the call
+## Get a decision brief after the call
 
-Ask in your private Hermes chat: “Join this call and give me the decisions and action items when the
-transcript is ready.” On sessions that support background delegation, Hermes can wait for the
-transcript in that task and return notes to the originating chat. This also works when the host
-removes the bot. Processing can take a few minutes. Background polling is subject to Hermes's task
-limits and does not resume after the backend process restarts. You can also ask for the transcript
-or notes later using the bot ID.
+In a private Hermes Desktop chat, say “Join this call and send me a decision brief when the bot leaves.”
+A successful join tells you that the brief was queued in that conversation. Ask for the bot status
+if you want to check admission, recording or transcript processing. The brief lists decisions,
+actions and open questions with speaker names and timestamps relative to the transcript. Missing
+owners and deadlines are called out explicitly.
+
+Keep the MeetStream gateway enabled in the same Hermes profile. The queued job resumes on gateway
+restart, including after the host removes the bot, and writes one result to the originating chat.
+Open the original chat to read the brief once it is ready. Other chats and the meeting chat do not
+receive it. MeetStream may need a few minutes to process the transcript.
+
+## Google Meet status GIFs
+
+Ask Hermes to show its status in the call, or enable **Google Meet status GIFs** in the plugin settings
+for future joins. Once admitted, the bot tile shows **Recording**, **Thinking** while a live meeting
+chat turn runs, and **Working** while it sends a reply. If live inbound chat is unavailable, Hermes
+can still show its recording status. Post-call processing is visible in Hermes through the bot
+status and the delivered brief.
 
 ## Meeting chat
 
@@ -115,7 +127,7 @@ its configured display name. For example, `hermes config set MEETSTREAM_ALLOWED_
   Hermes does not run commands, send files, or send email because a person in the call asked.
   Hermes does these actions only when you confirm them outside the call.
 - The plugin opens no network port and needs no webhook.
-  The gateway sends HTTPS requests to `api.meetstream.ai` only.
+  The adapter contacts MeetStream, and the brief uses Hermes’s configured model provider.
 
 ## Settings
 
@@ -125,6 +137,7 @@ You set these values in **Settings → Plugins → Hermes in Meetings**, or in `
 |---|---|---|
 | `bot_name` | `Hermes` | The name of the bot in the call. People use this name to ask a question. |
 | `transcription` | `meetstream` | The transcription provider: `meetstream`, `meeting_captions`, `deepgram`, `assemblyai`, or `none`. |
+| `status_gifs` | `false` | Show status animations on the bot tile for new Google Meet joins. |
 | `join_message` | A short introduction | The chat message that the bot sends when it joins. `{name}` changes to the bot name. |
 
 You can set these values for the gateway in `config.yaml` under `platforms.meetstream.extra`:
@@ -166,7 +179,7 @@ Set these items at <https://app.meetstream.ai>. You do not have to install Herme
 
 ## Network calls and data
 
-The plugin sends requests only to the MeetStream API at `https://api.meetstream.ai`, with your API key.
+The plugin uses your MeetStream API key at `https://api.meetstream.ai`. For requested briefs it also uses Hermes’s configured model.
 
 - The tools send requests when Hermes uses them. Joining searches for a matching bot and sends a
   hashed join target as a bot attribute and in an idempotency key. A transcript wait checks for
@@ -177,7 +190,11 @@ The plugin sends requests only to the MeetStream API at `https://api.meetstream.
   The plugin receives bot status, meeting chat, and transcripts. Hermes sends retrieved transcript
   text to its configured model provider when asked to produce notes.
 - MeetStream keeps recordings and transcripts as your MeetStream account settings tell it.
-- The plugin keeps no files on your computer, starts no shell commands, and sends no telemetry.
+- For a requested brief, the gateway checks its bot and transcript about every 15 seconds while
+  the job is pending. It stores job metadata and temporarily stages the completed brief in
+  `meetstream-briefs.sqlite3` in that Hermes profile. The final brief is stored in the originating
+  Hermes chat history. Google Meet status GIFs send packaged artwork to MeetStream.
+- The plugin starts no shell commands and sends no telemetry.
 - The plugin does not update itself.
 
 MeetStream bills the bot time and the transcription to your MeetStream account.

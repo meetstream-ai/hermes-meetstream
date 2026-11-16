@@ -6,10 +6,12 @@ logs request or response bodies above DEBUG: meeting chats and transcripts are u
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from datetime import UTC, datetime
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -22,6 +24,8 @@ TIMEOUT_S = 20.0
 MAX_LIST_PAGES = 4
 MAX_CHAT = 2000  # send_message rejects longer bodies (SendMessageRequest.maxLength)
 JOIN_ATTR = "hermes_join_target"
+GIF_ATTR = "hermes_status_gifs"
+GIF_DURATION = 40
 HERMES_ATTR = "hermes"  # custom attribute that marks a bot as one Hermes speaks through
 
 # Meeting hosts MeetStream can join. Anything else is refused before a bot is billed.
@@ -245,7 +249,7 @@ async def create_bot(client, key, payload: dict) -> dict:
                 continue
             status = field(record, "status", "Status")
             if norm_status(status) not in JOIN_FINISHED:
-                return {"bot_id": bot_id, "status": status, "reused": True}
+                return {"bot_id": bot_id, "status": status, "reused": True, "custom_attributes": attrs}
             previous = max(previous, (bot_created_at(record), str(bot_id)))
     if more:
         raise MeetStreamError(0, "Could not verify whether a bot is already in this meeting. Try again later.")
@@ -302,6 +306,15 @@ async def get_chats(client, key, bot_id: str) -> list[dict] | None:
 
 async def send_message(client, key, bot_id: str, text: str) -> dict:
     return await request(client, key, "POST", bot_path(bot_id, "send_message"), body={"message": text[:MAX_CHAT]})
+
+
+async def send_status_gif(client, key: str, bot_id: str, state: str) -> dict:
+    name = {"recording": "recording.gif", "thinking": "thinking.gif", "working": "working.gif"}[state]
+    image = (Path(__file__).resolve().parent / "assets" / name).read_bytes()
+    # A short thinking/working status expires quickly even if the bot disconnects mid-turn.
+    duration = GIF_DURATION if state == "recording" else 10
+    return await request(client, key, "POST", bot_path(bot_id, "send_image"),
+                         body={"img": base64.b64encode(image).decode("ascii"), "display_duration": duration})
 
 
 async def remove_bot(client, key, bot_id: str) -> dict:

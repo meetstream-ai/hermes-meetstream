@@ -16,7 +16,7 @@ _SKILLS = Path(__file__).resolve().parent / "skills"
 def register(ctx) -> None:
     ctx.register_platform(
         name=adapter.PLATFORM, label="MeetStream (Hermes in Meetings)",
-        adapter_factory=lambda cfg: adapter.MeetStreamAdapter(cfg),
+        adapter_factory=lambda cfg: adapter.MeetStreamAdapter(cfg, llm=getattr(ctx, "llm", None)),
         check_fn=adapter.check_requirements, validate_config=adapter.validate_config,
         is_connected=adapter.is_connected, required_env=[adapter.KEY_ENV],
         install_hint="no extra packages; httpx ships with Hermes",

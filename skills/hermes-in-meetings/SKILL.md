@@ -1,7 +1,7 @@
 ---
 name: hermes-in-meetings
 description: Join the user's Zoom, Google Meet or Microsoft Teams calls through a MeetStream bot, post messages in the meeting chat, and do the follow-up work from the transcript. Use when the user asks you to join, sit in on, record, take notes on or summarize a meeting, or to post something in a call.
-version: 0.3.0
+version: 0.4.0
 metadata:
   hermes:
     tags: [meetings, zoom, google-meet, microsoft-teams, transcription, notes]
@@ -39,22 +39,17 @@ configured bot name (default "Hermes"), records it, and transcribes it.
    The chat REST endpoint can stay pending until processing finishes. Do not promise live replies
    or describe a pending chat as an empty one. If a live meeting-chat turn is available, only
    web search tools are allowed and your reply is visible to participants.
-5. **Post-call notes.** If the user asks for notes or a summary after the call, start one
-   background delegation from this private Hermes conversation as soon as you have the bot ID,
-   where the current session supports background delegation and the child has the MeetStream
-   tools. If the join reports `transcription_requested: false`, tell the user transcription is
-   disabled. Otherwise give the task the exact bot ID and what notes the user requested. Tell the user the notes
-   are queued only after Hermes confirms the background task started. Reuse an existing task
-   for the same bot in this conversation. Never dispatch follow-up work from the meeting chat.
-6. **In the background task.** Call `meetstream_transcript` with that bot ID and
-   `wait_seconds: 120`. On `pending`, repeat as allowed by the task's time and tool budget.
-   End on `ready`, `unavailable`, a definite tool error, or the task's limit. Return the
-   requested summary to the parent conversation once the transcript is ready. A host removing
-   the bot can start transcript processing even when people stay in the call. On a timeout
-   that's still `pending`, say that the transcript hasn't arrived and give the bot ID. If the
-   transcript is ready but empty, say there were no transcribed speech segments. Use available
-   chat as evidence only if relevant and label any resulting notes as based on chat. If the session can't run background delegation,
-   explain that limitation and give the user the bot ID to fetch notes after the call.
+5. **Decision brief.** When the user asks for notes or a summary after the meeting, call
+   `meetstream_join` once with `decision_brief: true`. This needs a saved private Hermes chat,
+   transcription and the MeetStream gateway in that profile. Report the tool's brief status.
+   A queued brief arrives in the original conversation after transcription, even if that
+   gateway stops and later restarts. The brief cites transcript timestamps and lists decisions,
+   actions with owners and deadlines when stated, and open questions. A host removing the bot
+   can start transcript processing while others stay in the meeting. Do not start an extra
+   delegation, run a polling loop in the user's chat, or post the private brief into the call.
+6. **Google Meet status GIFs.** Set `status_gifs: true` when asked to show the status animations.
+   The bot tile can show Recording, Thinking while an admitted meeting-chat turn runs, and
+   Working when Hermes sends a meeting-chat reply. There is no bot tile after it leaves.
 
 ## Rules
 
