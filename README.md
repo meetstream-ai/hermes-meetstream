@@ -18,6 +18,9 @@ You set the other options in the MeetStream dashboard.
 | Tool | `meetstream_chat` | Sends a message to the meeting chat. |
 | Tool | `meetstream_transcript` | Gives the transcript and the meeting chat. |
 | Tool | `meetstream_leave` | Makes the bot leave the call. MeetStream keeps the data. |
+| Tool | `meetstream_find_meetings` | Finds recent calls by title, date or calendar occurrence. |
+| Tool | `meetstream_calendar` | Lists upcoming events and previews one chosen occurrence. |
+| Tool | `meetstream_schedule_event` | Requests approval, then schedules one previewed occurrence. |
 | Gateway platform | `meetstream` | Delivers decision briefs and shows Google Meet status GIFs. Routes live replies when meeting chat is available. |
 | Skill | `meetstream:hermes-in-meetings` | Tells Hermes how to attend a call and how to do the follow-up work. |
 
@@ -81,10 +84,40 @@ receive it. MeetStream may need a few minutes to process the transcript.
 ## Google Meet status GIFs
 
 Ask Hermes to show its status in the call, or enable **Google Meet status GIFs** in the plugin settings
-for future joins. Once admitted, the bot tile shows **Recording**, **Thinking** while a live meeting
-chat turn runs, and **Working** while it sends a reply. If live inbound chat is unavailable, Hermes
-can still show its recording status. Post-call processing is visible in Hermes through the bot
-status and the delivered brief.
+for future joins. Hermes shows the supplied **Thinking** GIF at the start of a live meeting chat
+turn, the combined activity GIF during longer turns, and **Working** while sending a reply. The
+GIFs expire shortly after the activity ends. The bot announces recording in the meeting chat.
+Admission, recording and post-call processing remain available through `meetstream_status`.
+The bundled files are resized and re-encoded for the video command and retain their embedded
+Nous Research artwork credits and MIT notices. Inline uploads showed the first frame in our
+Google Meet test. For animated playback, serve the three files from a public HTTPS directory
+and set `status_gif_base_url`. Hermes appends each asset's filename to that directory and uses
+MeetStream's [URL-based GIF playback](https://docs.meetstream.ai/guides/features/chat-and-visuals).
+
+## Find a previous meeting by name
+
+In a private Hermes chat, ask “What did we decide in Tuesday’s launch sync?” Hermes looks for
+recent calls and synced calendar occurrences by title or date. If several calls match, pick one
+by its title and start time. Hermes then fetches only that call’s transcript. Search reads metadata
+on demand and keeps no transcript index.
+
+Connect Google Calendar or Outlook in the MeetStream dashboard to search by calendar title.
+When creating a bot by link, you can supply a title for future searches. Older bots without a title
+can be found by date or by a unique calendar match on the same room link and nearby actual start
+time. If a legacy calendar bot has audio but no transcript, request transcription in MeetStream
+before asking Hermes for its notes.
+
+## Schedule one named calendar event
+
+Ask “Send Hermes to tomorrow’s design review.” If more than one event matches, pick the occurrence
+you want. Hermes previews its title, start time and time zone, and what you’ll receive. Approve the
+preview in Hermes to schedule the bot. It checks the event again before booking.
+
+This uses MeetStream’s [one-off scheduled join](https://docs.meetstream.ai/guides/features/scheduling-bots)
+so the existing transcription and decision-brief flow applies. It uses the event’s current time and
+link. If the calendar event is moved, cancelled, or gets a new link after booking, update or cancel
+the scheduled bot in MeetStream. This flow skips declined occurrences and leaves calendar auto-join
+settings alone.
 
 ## Meeting chat
 
@@ -137,7 +170,8 @@ You set these values in **Settings → Plugins → Hermes in Meetings**, or in `
 |---|---|---|
 | `bot_name` | `Hermes` | The name of the bot in the call. People use this name to ask a question. |
 | `transcription` | `meetstream` | The transcription provider: `meetstream`, `meeting_captions`, `deepgram`, `assemblyai`, or `none`. |
-| `status_gifs` | `false` | Show status animations on the bot tile for new Google Meet joins. |
+| `status_gifs` | `false` | Show status artwork on the bot tile for new Google Meet joins. |
+| `status_gif_base_url` | Empty | Public HTTPS directory for animated playback of the three supplied GIFs. |
 | `join_message` | A short introduction | The chat message that the bot sends when it joins. `{name}` changes to the bot name. |
 
 You can set these values for the gateway in `config.yaml` under `platforms.meetstream.extra`:
@@ -181,6 +215,9 @@ Set these items at <https://app.meetstream.ai>. You do not have to install Herme
 
 The plugin uses your MeetStream API key at `https://api.meetstream.ai`. For requested briefs it also uses Hermes’s configured model.
 
+- Calendar lookup reads synced event titles, times, calendars, links, RSVP status, and attached bot IDs
+  from the connected MeetStream account. Scheduling stores the selected occurrence ID and title as
+  bot attributes. No separate calendar credentials are stored by the plugin.
 - The tools send requests when Hermes uses them. Joining searches for a matching bot and sends a
   hashed join target as a bot attribute and in an idempotency key. A transcript wait checks for
   readiness every 15 seconds for up to 120 seconds per tool call.

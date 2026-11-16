@@ -1,14 +1,14 @@
 name: meetstream
 label: Hermes in Meetings
 kind: platform
-version: 0.4.0
+version: 0.5.0
 requires_hermes: ">=0.23.0"
 author: MeetStream
 description: >
   Hermes in Meetings, powered by MeetStream. Hermes joins your Zoom, Google Meet and Microsoft Teams
   calls as a visible bot, records and transcribes them, and does the follow-up work afterwards.
   Hermes can post messages while the bot is in a call and retrieve the saved chat afterwards.
-  Setup uses a MeetStream API key. Workspace webhooks, calendar auto-join and storage are configured
+  Find recent meetings and schedule individual synced calendar occurrences. Setup uses a MeetStream API key. Workspace webhooks, calendar auto-join and storage are configured
   in the MeetStream dashboard.
 provides_tools:
   - meetstream_join
@@ -16,6 +16,9 @@ provides_tools:
   - meetstream_chat
   - meetstream_transcript
   - meetstream_leave
+  - meetstream_find_meetings
+  - meetstream_calendar
+  - meetstream_schedule_event
 provides_hooks:
   - pre_llm_call
   - pre_tool_call
@@ -61,3 +64,8 @@ config_schema:
     default: false
     label: "Google Meet status GIFs"
     description: "Show Hermes activity on its Google Meet tile for newly joined calls."
+  status_gif_base_url:
+    type: str
+    default: ""
+    label: "Hosted status GIF directory"
+    description: "Public HTTPS directory containing the three packaged GIFs for animated playback."

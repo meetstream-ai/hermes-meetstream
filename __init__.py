@@ -31,5 +31,6 @@ def register(ctx) -> None:
                           description=schema["description"], emoji=emoji)
     ctx.register_hook("pre_llm_call", guard.on_pre_llm_call)
     ctx.register_hook("pre_tool_call", guard.on_pre_tool_call)
+    ctx.register_hook("pre_tool_call", tools.schedule_approval)
     for skill_dir in sorted(p for p in _SKILLS.iterdir() if (p / "SKILL.md").is_file()):
         ctx.register_skill(skill_dir.name, skill_dir / "SKILL.md")

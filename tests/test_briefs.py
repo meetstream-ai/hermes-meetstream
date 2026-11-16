@@ -147,7 +147,7 @@ class FeatureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(create.call_args.args[2]["custom_attributes"][api.GIF_ATTR])
                 watch.assert_called_once_with(BOT, status_gifs=True)
 
-    async def test_recording_thinking_and_working_send_animated_gifs(self):
+    async def test_only_actual_activity_sends_the_supplied_animated_gifs(self):
         sent = []
 
         def respond(request):
@@ -170,12 +170,34 @@ class FeatureTests(unittest.IsolatedAsyncioTestCase):
                 w.status = "recording"
                 await a._poll_bot(w)
                 self.assertTrue(w.chat_pending)
+                self.assertEqual(sent, [])
                 await a.send_typing(BOT)
                 await a.send_typing(BOT)
+                w.typing_since -= api.GIF_DURATION
+                await a.send_typing(BOT)
+                await a.stop_typing(BOT)
+                self.assertIsNone(w.typing_since)
                 self.assertTrue((await a.send(BOT, "QA reply")).success)
-        self.assertEqual(sent, [(ROOT / "assets" / f"{name}.gif").read_bytes()
-                                for name in ("recording", "thinking", "working")])
+        self.assertEqual(sent, [(ROOT / "assets" / name).read_bytes() for name in (
+            "hermes-agent-thinking.gif", "hermes-agent-nous-research.gif", "hermes-agent-working.gif",
+        )])
         self.assertTrue(all(gif.startswith(b"GIF89a") and b"NETSCAPE2.0" in gif for gif in sent))
+
+    async def test_hosted_gif_uses_meetstream_url_playback(self):
+        calls = []
+
+        def respond(request):
+            calls.append(json.loads(request.content))
+            return httpx.Response(200, json={"status": "accepted"})
+
+        async with httpx.AsyncClient(base_url=api.BASE_URL, transport=httpx.MockTransport(respond)) as client:
+            await api.send_status_gif(client, KEY, BOT, "activity", base_url="https://assets.example.com/hermes/")
+            with self.assertRaises(ValueError):
+                await api.send_status_gif(client, KEY, BOT, "activity", base_url="http://assets.example.com/hermes/")
+        self.assertEqual(calls, [{
+            "img_url": "https://assets.example.com/hermes/hermes-agent-nous-research.gif",
+            "display_duration": api.GIF_DURATION,
+        }])
 
     def test_action_restatements_preserve_distinct_work(self):
         rows = [

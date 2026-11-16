@@ -141,7 +141,7 @@ class _Watch:
     status_gifs: bool = False
     gif_state: str = ""
     gif_at: float = float("-inf")
-    gif_busy_until: float = 0.0
+    typing_since: Optional[float] = None
     gif_retry_at: float = 0.0
     gif_lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
     seen: set[str] = dc_field(default_factory=set)
@@ -163,6 +163,7 @@ class MeetStreamAdapter(BasePlatformAdapter):
         self._bots: dict[str, _Watch] = {}
         self._sent: dict[str, list[str]] = {}
         self._bot_name = "Hermes"
+        self._gif_base_url = ""
         self._profile_home = str(get_hermes_home())
         self._started_at = time.time()
         self._discovery_retry_at = float("-inf")
@@ -251,7 +252,9 @@ class MeetStreamAdapter(BasePlatformAdapter):
     async def _tick(self) -> None:
         from .meetstream_tools import settings
 
-        self._bot_name = str(settings()["bot_name"]).strip() or "Hermes"
+        config = settings()
+        self._bot_name = str(config["bot_name"]).strip() or "Hermes"
+        self._gif_base_url = str(config.get("status_gif_base_url") or "").strip()
         now = time.monotonic()
         with _PENDING_LOCK:
             for entry, (added_at, gifs) in list(_PENDING.items()):
@@ -327,8 +330,6 @@ class MeetStreamAdapter(BasePlatformAdapter):
             return
         if w.status not in api.CHAT_READY:
             return
-        if now >= w.gif_busy_until:
-            await self._show_status(w, "recording")
         if now < w.chat_retry_at:
             return
         messages = await api.get_chats(self._client, _key(), w.bot_id)
@@ -362,12 +363,14 @@ class MeetStreamAdapter(BasePlatformAdapter):
             return
         async with w.gif_lock:
             now = time.monotonic()
-            refresh = api.GIF_DURATION - 5 if state == "recording" else 8
+            refresh = api.GIF_DURATION - 2
             if now < w.gif_retry_at or (w.gif_state == state and now - w.gif_at < refresh):
                 return
             try:
-                await asyncio.wait_for(api.send_status_gif(self._client, _key(), w.bot_id, state), 2)
-            except (api.MeetStreamError, OSError, TimeoutError) as e:
+                await asyncio.wait_for(api.send_status_gif(
+                    self._client, _key(), w.bot_id, state, base_url=self._gif_base_url,
+                ), 2)
+            except (api.MeetStreamError, OSError, TimeoutError, ValueError) as e:
                 w.gif_retry_at = now + STATUS_REFRESH_S
                 logger.debug("[%s] Status GIF unavailable for bot %s: %s",
                              self.name, w.bot_id, type(e).__name__)
@@ -419,7 +422,6 @@ class MeetStreamAdapter(BasePlatformAdapter):
         try:
             watch = self._bots[chat_id]
             if watch.status_gifs:
-                watch.gif_busy_until = time.monotonic() + 6
                 await self._show_status(watch, "working")
             for part in api.chunks(content):
                 await api.send_message(self._client, _key(), chat_id, part)
@@ -434,8 +436,16 @@ class MeetStreamAdapter(BasePlatformAdapter):
         # Hermes only invokes this for an active gateway turn. No incoming turn, no thinking GIF.
         watch = self._bots.get(chat_id)
         if watch and watch.status_gifs:
-            watch.gif_busy_until = time.monotonic() + 4
-            await self._show_status(watch, "thinking")
+            now = time.monotonic()
+            if watch.typing_since is None:
+                watch.typing_since = now
+            state = "activity" if now - watch.typing_since >= api.GIF_DURATION - 2 else "thinking"
+            await self._show_status(watch, state)
+
+    async def stop_typing(self, chat_id: str) -> None:
+        watch = self._bots.get(chat_id)
+        if watch:
+            watch.typing_since = None
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": f"Meeting {chat_id[:8]}", "type": "group", "chat_id": chat_id}

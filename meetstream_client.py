@@ -25,7 +25,9 @@ MAX_LIST_PAGES = 4
 MAX_CHAT = 2000  # send_message rejects longer bodies (SendMessageRequest.maxLength)
 JOIN_ATTR = "hermes_join_target"
 GIF_ATTR = "hermes_status_gifs"
-GIF_DURATION = 40
+GIF_DURATION = 10
+EVENT_ATTR = "hermes_calendar_event_id"
+TITLE_ATTR = "hermes_meeting_title"
 HERMES_ATTR = "hermes"  # custom attribute that marks a bot as one Hermes speaks through
 
 # Meeting hosts MeetStream can join. Anything else is refused before a bot is billed.
@@ -228,12 +230,16 @@ def is_hermes_bot(record: dict, bot_name: str) -> bool:
 
 # -- Endpoints -------------------------------------------------------------------------------------
 
-def _join_target(payload: dict) -> str:
-    url = payload["meeting_link"]
+def meeting_identity(url: str) -> str:
     parsed = urlparse(url)
     if parsed.netloc == "meet.google.com" and re.fullmatch(r"/[a-z]{3}-[a-z]{4}-[a-z]{3}/?", parsed.path):
         # Google Meet's sharing and account-selection parameters do not change the room code.
         url = f"https://meet.google.com{parsed.path.rstrip('/')}"
+    return url
+
+
+def _join_target(payload: dict) -> str:
+    url = meeting_identity(payload["meeting_link"])
     return sha256(f"{url}\n{payload.get('join_at', '')}".encode()).hexdigest()
 
 
@@ -308,13 +314,23 @@ async def send_message(client, key, bot_id: str, text: str) -> dict:
     return await request(client, key, "POST", bot_path(bot_id, "send_message"), body={"message": text[:MAX_CHAT]})
 
 
-async def send_status_gif(client, key: str, bot_id: str, state: str) -> dict:
-    name = {"recording": "recording.gif", "thinking": "thinking.gif", "working": "working.gif"}[state]
-    image = (Path(__file__).resolve().parent / "assets" / name).read_bytes()
-    # A short thinking/working status expires quickly even if the bot disconnects mid-turn.
-    duration = GIF_DURATION if state == "recording" else 10
+async def send_status_gif(client, key: str, bot_id: str, state: str, *, base_url: str = "") -> dict:
+    name = {
+        "thinking": "hermes-agent-thinking.gif",
+        "activity": "hermes-agent-nous-research.gif",
+        "working": "hermes-agent-working.gif",
+    }[state]
+    if base_url:
+        parsed = urlparse(base_url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment or parsed.params):
+            raise ValueError("The status GIF base URL must be a public HTTPS directory without credentials or query parameters.")
+        image = {"img_url": base_url.rstrip("/") + "/" + name}
+    else:
+        data = (Path(__file__).resolve().parent / "assets" / name).read_bytes()
+        image = {"img": base64.b64encode(data).decode("ascii")}
     return await request(client, key, "POST", bot_path(bot_id, "send_image"),
-                         body={"img": base64.b64encode(image).decode("ascii"), "display_duration": duration})
+                         body={**image, "display_duration": GIF_DURATION})
 
 
 async def remove_bot(client, key, bot_id: str) -> dict:

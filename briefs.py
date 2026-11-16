@@ -74,10 +74,11 @@ class Briefs:
         finally:
             connection.close()
 
-    def queue(self, bot_id: str, session_id: str, state: str) -> bool:
+    def queue(self, bot_id: str, session_id: str, state: str, *, start_check: float | None = None) -> bool:
+        due = max(time.time(), start_check or 0)
         with self.db() as db:
             db.execute("INSERT OR IGNORE INTO briefs(bot_id, session_id, state, due) VALUES (?, ?, ?, ?)",
-                       (bot_id, session_id, state, time.time()))
+                       (bot_id, session_id, state, due))
             return db.execute("SELECT session_id FROM briefs WHERE bot_id = ?", (bot_id,)).fetchone()[0] == session_id
 
     def status(self, bot_id: str, session_id: str) -> str | None:
