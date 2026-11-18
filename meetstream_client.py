@@ -16,6 +16,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.meetstream.ai/api/v1"
+BILLING_URL = "https://app.meetstream.ai/billing"  # where the account owner adds prepaid credits
 TIMEOUT_S = 20.0
 MAX_CHAT = 2000  # send_message rejects longer bodies (SendMessageRequest.maxLength)
 HERMES_ATTR = "hermes"  # custom attribute that marks a bot as one Hermes speaks through
@@ -63,7 +64,8 @@ def _detail(resp: httpx.Response) -> str:
     except ValueError:
         return resp.text[:200]
     if isinstance(data, dict):
-        for key in ("detail", "error", "message"):
+        # MeetStream error bodies are {"message": ...}; older answers used "error" or "detail".
+        for key in ("message", "error", "detail"):
             if data.get(key):
                 return str(data[key])[:200]
     return str(data)[:200]
@@ -80,7 +82,11 @@ async def request(client: httpx.AsyncClient, key: str, method: str, path: str, *
         raise MeetStreamError(0, f"MeetStream unreachable: {type(e).__name__}") from e
     logger.debug("MeetStream %s %s -> %s", method, path, resp.status_code)
     if resp.status_code >= 400:
-        raise MeetStreamError(resp.status_code, _detail(resp))
+        detail = _detail(resp)
+        retry_after = resp.headers.get("Retry-After", "").strip()
+        if retry_after.isdigit():  # 429 (prepaid create limit) and 409 (same create still saving)
+            detail += f" (retry after {retry_after} s)"
+        raise MeetStreamError(resp.status_code, detail)
     if not resp.content:
         return {}
     try:

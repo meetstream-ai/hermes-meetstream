@@ -120,7 +120,7 @@ You set these values in **Settings → Plugins → Hermes in Meetings**, or in `
 | Setting | Default | What it does |
 |---|---|---|
 | `bot_name` | `Hermes` | The name of the bot in the call. People use this name to ask a question. |
-| `transcription` | `meetstream` | The transcription provider: `meetstream`, `meeting_captions`, `deepgram`, `assemblyai`, or `none`. |
+| `transcription` | `meetstream` | The transcription provider: `meetstream`, `meeting_captions`, `deepgram`, `assemblyai`, or `none`. `meetstream` adds $0.10 for each hour. For `deepgram` and `assemblyai`, save your own provider key in the MeetStream dashboard. |
 | `join_message` | A short introduction | The chat message that the bot sends when it joins. `{name}` changes to the bot name. |
 
 You can set these values for the gateway in `config.yaml` under `platforms.meetstream.extra`:
@@ -171,8 +171,9 @@ The plugin sends requests only to the MeetStream API at `https://api.meetstream.
 - The plugin keeps no files on your computer, starts no shell commands, and sends no telemetry.
 - The plugin does not update itself.
 
-MeetStream bills the bot time and the transcription to your MeetStream account.
+MeetStream bills the bot time and the transcription to your MeetStream account from prepaid credit.
 Refer to <https://meetstream.ai/pricing>.
+If the account has no credit, `meetstream_join` tells Hermes to give you the top-up link: <https://app.meetstream.ai/billing>.
 
 ## Hermes in Meetings or the MeetStream connector
 

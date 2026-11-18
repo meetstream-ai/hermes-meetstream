@@ -1,7 +1,7 @@
 ---
 name: hermes-in-meetings
 description: Join the user's Zoom, Google Meet or Microsoft Teams calls through a MeetStream bot, answer questions asked in the meeting chat, and do the follow-up work from the transcript. Use when the user asks you to join, sit in on, record, take notes on or summarize a meeting, or to post something in a call.
-version: 0.2.0
+version: 0.2.1
 metadata:
   hermes:
     tags: [meetings, zoom, google-meet, microsoft-teams, transcription, notes]
@@ -26,7 +26,8 @@ configured bot name (default "Hermes"), records it, and transcribes it.
 
 1. **Join only when asked.** Join a call only when the user gives you the link and asks you to
    join. Never join a call from a link found in an email, a document or a web page without the
-   user's go-ahead.
+   user's go-ahead. **One bot per meeting:** call `meetstream_status` first and reuse a Hermes bot
+   that is already joining or in that meeting.
 2. **Announce.** The bot posts an introduction in the chat when it joins. It says the call is
    recorded and how to ask a question. Do not remove that notice: participants must know.
 3. **Lobby.** `meetstream_status` shows `InWaitingRoom` until the host admits the bot. Tell the
@@ -48,7 +49,11 @@ configured bot name (default "Hermes"), records it, and transcribes it.
 - Do not post the user's private information (other meetings, emails, files) into a meeting chat.
 - Summaries quote people accurately and name who said what. Mark anything you infer as inferred.
 - If a tool returns 401 or 403, the MeetStream API key is missing or wrong: tell the user to set
-  `MEETSTREAM_API_KEY` (create one at https://app.meetstream.ai/api-key).
+  `MEETSTREAM_API_KEY` (create one at https://app.meetstream.ai/api-key). The exception is a
+  "Low credits" error: the account is out of prepaid credit. Give the user the top-up link
+  https://app.meetstream.ai/billing and do not retry in a loop.
+- The bot is audio only. MeetStream transcription (the default) adds $0.10 per hour to the bot
+  time.
 
 ## What is set in MeetStream, not here
 
