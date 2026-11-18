@@ -96,7 +96,7 @@ class MobileBriefTests(unittest.IsolatedAsyncioTestCase):
     async def test_call_end_and_late_transcript_trigger_the_dm_without_a_prompt(self):
         self.ledger.queue(BOT, SESSION, "In the meeting", origin=self.origin)
         model = SimpleNamespace(acomplete_structured=mock.AsyncMock(return_value=SimpleNamespace(parsed={
-            "decisions": [{"text": "Use the blue cover", "ref": 1}],
+            "decisions": [{"text": "Use the blue cover", "ref": 1, "quote": "Use the blue cover"}],
             "actions": [], "questions": [],
         })))
         send = mock.AsyncMock(return_value=SimpleNamespace(success=True))
@@ -135,3 +135,62 @@ class MobileBriefTests(unittest.IsolatedAsyncioTestCase):
         await briefs.poll(self.home, None, KEY, None, lambda route: messaging.resolve_sender(runner, route, "default"))
         send.assert_awaited_once_with(origin["chat_id"], TEXT, metadata=None)
         self.assertIn("permission revoked", self.ledger.status("whatsapp-revoked", "whatsapp"))
+
+
+    async def test_flood_refusal_retries_and_persists_receipt(self):
+        self.queue()
+        send = mock.AsyncMock(side_effect=[
+            SimpleNamespace(success=False, retry_after=300),
+            SimpleNamespace(success=True, message_id="191"),
+        ])
+        await briefs.poll(self.home, None, KEY, None, lambda _: send)
+        self.assertEqual(self.ledger.status(BOT, SESSION), "Waiting to retry delivery")
+        await briefs.poll(self.home, None, KEY, None, lambda _: send)
+        self.assertEqual(send.await_count, 1)
+        self.allow_now()
+        await briefs.poll(self.home, None, KEY, None, lambda _: send)
+        await briefs.poll(self.home, None, KEY, None, lambda _: send)
+        self.assertEqual(send.await_count, 2)
+        self.assertEqual(self.ledger.result(BOT, SESSION), {
+            "state": "Result posted to this chat", "message_id": "191", "brief": TEXT,
+        })
+        self.assertIsNone(self.ledger.result(BOT, "other"))
+
+    async def test_long_telegram_brief_is_a_single_private_attachment(self):
+        long_text = TEXT + "\n" + "More context. " * 200
+
+        async def upload(chat_id, file_path, **_):
+            self.assertEqual(chat_id, "12345")
+            self.assertEqual(Path(file_path).read_text(), long_text)
+            return SimpleNamespace(success=True)
+
+        adapter = SimpleNamespace(platform=Platform.TELEGRAM, send=mock.AsyncMock(),
+                                  send_document=mock.AsyncMock(side_effect=upload), is_connected=True)
+        runner = SimpleNamespace(_delivery_adapter_for=mock.Mock(return_value=adapter),
+                                 _is_user_authorized_for_source=mock.Mock(return_value=True))
+        send = messaging.resolve_sender(runner, {**self.origin, "thread_id": None}, "default")
+        self.assertTrue((await send(long_text)).success)
+        adapter.send.assert_not_awaited()
+        self.assertFalse(Path(adapter.send_document.call_args.args[1]).exists())
+        send = messaging.resolve_sender(runner, self.origin, "default")
+        await send(long_text)
+        self.assertEqual(adapter.send_document.await_count, 1)
+        self.assertIn("saved in Hermes history", adapter.send.call_args.args[1])
+        self.assertEqual(adapter.send.call_args.kwargs["metadata"]["thread_id"], "7")
+
+    async def test_lost_ack_can_be_recovered_only_from_bound_origin(self):
+        self.queue()
+        send = mock.AsyncMock(side_effect=TimeoutError)
+        await briefs.poll(self.home, None, KEY, None, lambda _: send)
+        tokens = set_session_vars(platform="telegram", chat_id="12345", chat_type="dm", user_id="12345",
+                                  thread_id="7", session_key="bound", session_id=SESSION)
+        try:
+            with mock.patch.object(tools, "get_hermes_home", return_value=self.home):
+                recovered = json.loads(await tools.handle_recover_brief({"bot_id": BOT}, session_id=SESSION))
+                other = json.loads(await tools.handle_recover_brief({"bot_id": BOT}, session_id="other"))
+        finally:
+            clear_session_vars(tokens)
+        self.assertEqual(recovered["brief"], TEXT)
+        self.assertIn("unconfirmed", recovered["state"])
+        self.assertIn("error", other)
+        self.assertEqual(send.await_count, 1)

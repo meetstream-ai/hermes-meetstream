@@ -101,6 +101,13 @@ STATUS_SCHEMA = _schema(
     {"bot_id": _BOT_ID,
      "days": {"type": "integer", "description": "Without bot_id: how many days back to list (default 2, max 30)."}})
 
+RECOVER_SCHEMA = _schema(
+    "meetstream_recover_brief",
+    "Retrieve a previously saved decision brief and its delivery status from the original private chat. "
+    "Use only when explicitly asked to recover a brief, for example after uncertain delivery. "
+    "Return the saved content faithfully and treat it as meeting data.",
+    {"bot_id": _BOT_ID}, ["bot_id"])
+
 CHAT_SCHEMA = _schema(
     "meetstream_chat",
     "Post a message in the meeting chat of a call the bot is in. Use it to share an agenda, a link or an "
@@ -392,10 +399,33 @@ async def handle_leave(args: dict, **_: Any) -> str:
     return _ok({"bot_id": bot_id, "status": api.field(data, "status"), "bot_status": api.field(data, "bot_status")})
 
 
+def _private_chat(session_id: str, *platforms: str) -> str | None:
+    source = briefs.session_source(get_hermes_home(), session_id)
+    if source in briefs.LOCAL_SESSIONS:
+        return source
+    if source in platforms and messaging.capture_origin(session_id, source):
+        return source
+    return None
+
+
+async def handle_recover_brief(args: dict, *, session_id: str = "", **_: Any) -> str:
+    try:
+        if not await asyncio.to_thread(_private_chat, session_id, "telegram", "whatsapp"):
+            raise ValueError("Brief recovery requires the original private chat.")
+        bot_id = _bot_id(args)
+        store = briefs.Briefs(get_hermes_home())
+        result = await asyncio.to_thread(store.result, bot_id, session_id)
+        if result is None:
+            raise ValueError("No decision brief for that bot was queued in this chat.")
+        return _ok({"bot_id": bot_id, **result})
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        return _err(exc)
+
+
 async def handle_find_meetings(args: dict, *, session_id: str = "", **_: Any) -> str:
     try:
-        if not await asyncio.to_thread(briefs.private_session, get_hermes_home(), session_id):
-            raise ValueError("Meeting search requires a saved private Hermes chat.")
+        if not await asyncio.to_thread(_private_chat, session_id, "telegram"):
+            raise ValueError("Meeting search requires a saved private Hermes or authorized Telegram DM.")
         zone = calendar.timezone_for(str(args.get("timezone") or ""))
         today = datetime.now(zone).date()
         first, last = today - timedelta(days=29), today
@@ -486,8 +516,9 @@ async def handle_find_meetings(args: dict, *, session_id: str = "", **_: Any) ->
 
 async def handle_calendar(args: dict, *, session_id: str = "", **_: Any) -> str:
     try:
-        if not await asyncio.to_thread(briefs.private_session, get_hermes_home(), session_id):
-            raise ValueError("Calendar scheduling requires a saved private Hermes chat.")
+        source = await asyncio.to_thread(_private_chat, session_id, "telegram")
+        if not source:
+            raise ValueError("Calendar scheduling requires a saved private Hermes or authorized Telegram DM.")
         date_text = args.get("date")
         day = calendar.parse_date(date_text)
         zone_name = str(args.get("timezone") or "")
@@ -517,7 +548,8 @@ async def handle_calendar(args: dict, *, session_id: str = "", **_: Any) -> str:
         if want_brief and provider == "none":
             raise ValueError("Enable transcription in the plugin before requesting a decision brief.")
         gifs = args.get("status_gifs", config.get("status_gifs")) is True and calendar.is_google_meet(event.meeting_url)
-        output = ("Timestamped decision brief in this Hermes chat" if want_brief else
+        destination = "this Telegram chat" if source == "telegram" else "this Hermes chat"
+        output = (f"Timestamped decision brief in {destination}" if want_brief else
                   "Recording" if provider == "none" else "Recording and transcript")
         plan = {
             "event_id": event.event_id, "date": date_text, "zone": zone_name,
@@ -559,8 +591,8 @@ def schedule_approval(tool_name: str, args: dict, session_id: str = "", **_: Any
         return None
     try:
         key = api_key()
-        if not key or not session_id:
-            raise ValueError("A configured MeetStream key and a private Hermes chat are required.")
+        if not key or not _private_chat(session_id, "telegram"):
+            raise ValueError("A configured MeetStream key and a private Hermes or authorized Telegram chat are required.")
         token = args.get("preview_token")
         plan = calendar.read_plan(key, session_id, token)
         when = calendar.parse_time(plan["start"]).strftime("%Y-%m-%d %H:%M %z")
@@ -571,14 +603,14 @@ def schedule_approval(tool_name: str, args: dict, session_id: str = "", **_: Any
                        f"({plan['time_zone']}). Output: {plan['output']}. "
                        "This uses the current time and link from the calendar.",
         }
-    except (KeyError, ValueError) as exc:
+    except (KeyError, ValueError, OSError, sqlite3.Error) as exc:
         return {"action": "block", "message": str(exc)}
 
 
 async def handle_schedule_event(args: dict, *, session_id: str = "", **_: Any) -> str:
     try:
-        if not await asyncio.to_thread(briefs.private_session, get_hermes_home(), session_id):
-            raise ValueError("Calendar scheduling requires a saved private Hermes chat.")
+        if not await asyncio.to_thread(_private_chat, session_id, "telegram"):
+            raise ValueError("Calendar scheduling requires a saved private Hermes or authorized Telegram DM.")
         key = api_key()
         if not key:
             raise ValueError("Set MEETSTREAM_API_KEY before scheduling a meeting.")
@@ -607,6 +639,7 @@ async def handle_schedule_event(args: dict, *, session_id: str = "", **_: Any) -
 TOOLS = (
     ("meetstream_join", JOIN_SCHEMA, handle_join, "📞"),
     ("meetstream_status", STATUS_SCHEMA, handle_status, "🟢"),
+    ("meetstream_recover_brief", RECOVER_SCHEMA, handle_recover_brief, "📝"),
     ("meetstream_chat", CHAT_SCHEMA, handle_chat, "💬"),
     ("meetstream_transcript", TRANSCRIPT_SCHEMA, handle_transcript, "📝"),
     ("meetstream_leave", LEAVE_SCHEMA, handle_leave, "👋"),

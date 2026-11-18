@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from gateway.config import Platform
 from gateway.session import SessionSource
 from gateway.session_context import async_delivery_supported, bound_session_key, get_session_env
@@ -39,7 +42,8 @@ def resolve_sender(runner, origin: dict, profile: str | None):
         return None
     source = SessionSource.from_dict({**origin, "profile": profile or origin.get("profile")})
     adapter = runner._delivery_adapter_for(source)
-    if adapter is None or not adapter.is_connected or adapter.platform != Platform(origin["platform"]):
+    if (adapter is None or not adapter.is_connected or getattr(adapter, "send_path_degraded", False)
+            or adapter.platform != Platform(origin["platform"])):
         return None
     if not runner._is_user_authorized_for_source(source, allow_adapter_delegation=False):
         raise PermissionError("Messaging permission was revoked")
@@ -51,7 +55,15 @@ def resolve_sender(runner, origin: dict, profile: str | None):
         metadata["telegram_dm_topic_created_for_send"] = True
 
     async def send(text: str):
-        return await adapter.send(source.chat_id, text, metadata=metadata or None)
+        if source.platform == Platform.TELEGRAM and len(text.encode("utf-16-le")) > 3600:
+            # Older Hermes media adapters can fall back to the root DM if a topic is deleted.
+            # Use a single native text notification in topics until strict document routing is available.
+            if not source.thread_id:
+                with TemporaryDirectory(prefix="hermes-meetstream-") as directory:
+                    path = Path(directory) / "decision-brief.txt"
+                    path.write_text(text, encoding="utf-8")
+                    return await adapter.send_document(source.chat_id, str(path), caption="MeetStream decision brief")
+        return await adapter.send(source.chat_id, one_message(text), metadata=metadata or None)
 
     return send
 

@@ -14,6 +14,7 @@ You set the other options in the MeetStream dashboard.
 | Item | Name | What it does |
 |---|---|---|
 | Tool | `meetstream_join` | Sends the bot to a meeting link, now or at a set time. |
+| Tool | `meetstream_recover_brief` | Retrieves a saved brief and delivery status from the original private chat. |
 | Tool | `meetstream_status` | Shows the status of one bot, or a list of the recent Hermes bots. |
 | Tool | `meetstream_chat` | Sends a message to the meeting chat. |
 | Tool | `meetstream_transcript` | Gives the transcript and the meeting chat. |
@@ -90,9 +91,12 @@ adapter in the same Hermes profile. Use a private DM from an authorized account.
 
 Hermes saves the brief to the original conversation and sends a phone notification there. It checks
 that the original sender is still authorized before sending. If the messaging connection is offline,
-delivery waits for it. A send without a reliable acknowledgement is recorded as unconfirmed in the
-bot status. The full brief stays in Hermes history so it can be retrieved without risking a duplicate
-DM. Long phone messages show an excerpt and point to the saved brief.
+delivery waits for it. After a Telegram rate-limit refusal, the worker waits for Telegram's retry
+window and tries again. It saves Telegram's message ID on success. If Telegram may have accepted
+the message before the connection dropped, the worker marks delivery as unconfirmed. Ask Hermes
+in the original chat to recover the saved brief if it is missing. Long briefs in a Telegram
+DM without a topic arrive as a single text attachment. Telegram topics and WhatsApp get a
+shorter notification and can recover the full brief from Hermes history.
 
 This setup needs the Hermes gateway and your native messaging connection, plus the MeetStream API
 key. The brief worker checks only queued bots. While a bot is in the meeting it checks about once a
@@ -116,7 +120,7 @@ MeetStream's [URL-based GIF playback](https://docs.meetstream.ai/guides/features
 
 ## Find a previous meeting by name
 
-In a private Hermes chat, ask “What did we decide in Tuesday’s launch sync?” Hermes looks for
+In a private Hermes chat or Telegram DM, ask “What did we decide in Tuesday’s launch sync?” Hermes looks for
 recent calls and synced calendar occurrences by title or date. If several calls match, pick one
 by its title and start time. Hermes then fetches only that call’s transcript. Search reads metadata
 on demand and keeps no transcript index.
@@ -129,9 +133,9 @@ before asking Hermes for its notes.
 
 ## Schedule one named calendar event
 
-Ask “Send Hermes to tomorrow’s design review.” If more than one event matches, pick the occurrence
+From a private Hermes chat or an authorized Telegram DM, ask “Send Hermes to tomorrow’s design review.” If more than one event matches, pick the occurrence
 you want. Hermes previews its title, start time and time zone, and what you’ll receive. Approve the
-preview in Hermes to schedule the bot. It checks the event again before booking.
+preview with the Hermes approval prompt to schedule the bot. It checks the event again before booking.
 
 This uses MeetStream’s [one-off scheduled join](https://docs.meetstream.ai/guides/features/scheduling-bots)
 so the existing transcription and decision-brief flow applies. It uses the event’s current time and

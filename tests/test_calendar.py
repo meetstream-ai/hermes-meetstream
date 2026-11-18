@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from hermes_state import SessionDB
+from gateway.session_context import clear_session_vars, set_session_vars
 
 from test_plugin import KEY, api, tools
 
@@ -203,3 +204,48 @@ class CalendarTests(unittest.IsolatedAsyncioTestCase):
     def test_day_bounds_handle_dst(self):
         bounds = tools.calendar.day_bounds(date(2026, 11, 1), date(2026, 11, 1), ZoneInfo("America/New_York"))
         self.assertEqual(bounds[1] - bounds[0], timedelta(hours=25))
+
+
+    async def test_telegram_calendar_search_and_approved_schedule_keep_the_original_route(self):
+        with SessionDB(self.home / "state.db") as db:
+            db.create_session("telegram-origin", source="telegram")
+        self.event_records = [event("review", self.future, "Design Review")]
+        args = {**self.options(), "title": "Design Review"}
+        unbound = await self.tool(tools.handle_calendar, args, session="telegram-origin")
+        self.assertIn("error", unbound)
+        for chat_type in ("group", "dm"):
+            tokens = set_session_vars(platform="telegram", chat_id="12345", chat_type=chat_type, user_id="12345",
+                                      thread_id="7", session_key="bound", session_id="telegram-origin")
+            try:
+                found = await self.tool(tools.handle_calendar, args, session="telegram-origin")
+                if chat_type == "group":
+                    self.assertIn("error", found)
+                    continue
+                self.assertEqual(found["events"][0]["event_id"], "review")
+                historical = await self.tool(tools.handle_find_meetings, self.options(self.past),
+                                             session="telegram-origin")
+                self.assertIn("matches", historical)
+                preview = await self.tool(tools.handle_calendar, {**args, "event_id": "review"},
+                                          session="telegram-origin")
+                self.assertIn("this Telegram chat", preview["preview"]["output"])
+                requested = {"preview_token": preview["preview_token"]}
+                directive = tools.schedule_approval("meetstream_schedule_event", requested, session_id="telegram-origin")
+                self.assertEqual(directive["action"], "approve")
+                self.assertEqual(self.created, [])
+                from hermes_cli.plugins import resolve_pre_tool_block
+
+                with (mock.patch("hermes_cli.lifecycle.invoke_hook", return_value=[directive]),
+                      mock.patch("tools.approval.request_tool_approval", return_value={"approved": True})):
+                    self.assertIsNone(resolve_pre_tool_block("meetstream_schedule_event", requested,
+                                                              session_id="telegram-origin"))
+                result = await self.tool(tools.handle_schedule_event, requested, session="telegram-origin")
+                self.assertEqual(result["meeting_status"], "Scheduled")
+                ledger = tools.briefs.Briefs(self.home)
+                with ledger.db() as db:
+                    row = db.execute("SELECT origin FROM briefs WHERE bot_id = ?", (result["bot_id"],)).fetchone()
+                origin = json.loads(row[0])
+                self.assertEqual((origin["platform"], origin["chat_id"], origin["thread_id"]),
+                                 ("telegram", "12345", "7"))
+            finally:
+                clear_session_vars(tokens)
+        self.assertEqual(len(self.created), 1)

@@ -39,11 +39,11 @@ class Model:
         evidence = json.loads(input[0]["text"])
         assert evidence["2"]["speaker"] == "Priya"
         return SimpleNamespace(parsed={
-            "decisions": [{"text": "Use the blue cover.", "ref": 1}],
+            "decisions": [{"text": "Use the blue cover.", "ref": 1, "quote": "use the blue cover"}],
             "actions": [
-                {"text": "Deliver the first edit.", "owner": "Priya", "due": "Thursday", "ref": 2},
-                {"text": "Check captions.", "owner": "Sam", "due": "Friday", "ref": 3},
-                {"text": "Check captions", "owner": "Sam", "due": "Friday", "ref": 3},
+                {"text": "Deliver the first edit.", "owner": "Priya", "due": "Thursday", "ref": 2, "quote": "deliver the first edit Thursday"},
+                {"text": "Check captions.", "owner": "Sam", "due": "Friday", "ref": 3, "quote": "check captions on Friday"},
+                {"text": "Check captions", "owner": "Sam", "due": "Friday", "ref": 3, "quote": "check captions on Friday"},
             ],
             "questions": [],
         })
