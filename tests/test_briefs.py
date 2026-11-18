@@ -220,5 +220,21 @@ class FeatureTests(unittest.IsolatedAsyncioTestCase):
             await briefs.summarize(llm, TRANSCRIPT)
 
 
+    async def test_matching_timestamp_without_supporting_quote_is_omitted(self):
+        llm = mock.Mock()
+        llm.acomplete_structured = mock.AsyncMock(return_value=SimpleNamespace(parsed={
+            "decisions": [
+                {"text": "Use the blue cover", "ref": 1, "quote": "use the blue cover"},
+                {"text": "Cancel the launch", "ref": 1, "quote": "cancel the launch"},
+            ],
+            "actions": [],
+            "questions": [],
+        }))
+        text = await briefs.summarize(llm, TRANSCRIPT)
+        self.assertIn("Use the blue cover [00:29 · Priya]", text)
+        self.assertNotIn("Cancel the launch", text)
+        self.assertIn("supporting quotes could not be verified", text)
+
+
 if __name__ == "__main__":
     asyncio.run(worker(sys.argv[1], Path(sys.argv[2])))

@@ -1,6 +1,6 @@
 """MeetStream gateway platform: the meeting chat of each call Hermes is in becomes a conversation.
 
-Outbound only. The adapter polls the MeetStream API; Hermes opens no port and needs no webhook.
+The adapter polls the MeetStream API. An optional loopback webhook wakes queued briefs.
 - Discovery: bots this Hermes started (``meetstream_join`` hands them over at once) plus, every
   ``discovery_seconds``, the account's bots of the last day that are tagged ``hermes: true`` or carry
   the Hermes bot name, so a bot that MeetStream calendar auto-join sends under that name also gets Hermes.
@@ -159,6 +159,9 @@ class MeetStreamAdapter(BasePlatformAdapter):
         self._client = None
         self._task: Optional[asyncio.Task] = None
         self._brief_task: Optional[asyncio.Task] = None
+        self._brief_wake = asyncio.Event()
+        self._brief_webhook = None
+        self._brief_webhook_port = extra.get("brief_webhook_port")
         self._llm = llm
         self._bots: dict[str, _Watch] = {}
         self._sent: dict[str, list[str]] = {}
@@ -194,6 +197,16 @@ class MeetStreamAdapter(BasePlatformAdapter):
         self._wire_plugin_handlers(None)
         if self._llm is not None:
             self._brief_task = asyncio.create_task(self._run_briefs())
+            if self._brief_webhook_port:
+                try:
+                    from .brief_webhook import start_listener
+
+                    self._brief_webhook = await start_listener(
+                        Path(self._profile_home), self._brief_wake,
+                        int(self._brief_webhook_port), _get_scoped_secret("MEETSTREAM_BRIEF_WEBHOOK_SECRET", ""),
+                    )
+                except (ImportError, OSError, ValueError, RuntimeError) as exc:
+                    logger.warning("[%s] Brief webhook could not start; polling remains active: %s", self.name, exc)
         logger.info("[%s] Connected; chat poll %.0fs, discovery %s", self.name, self._chat_poll,
                     f"{self._discovery:.0f}s" if self._discovery else "off")
         return True
@@ -201,6 +214,9 @@ class MeetStreamAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         self._running = False
         self._mark_disconnected()
+        if self._brief_webhook:
+            await self._brief_webhook.cleanup()
+            self._brief_webhook = None
         tasks = [task for task in (self._task, self._brief_task) if task is not None]
         for task in tasks:
             task.cancel()
@@ -220,12 +236,16 @@ class MeetStreamAdapter(BasePlatformAdapter):
 
     async def _run_briefs(self) -> None:
         while self._running:
+            self._brief_wake.clear()
             try:
                 await briefs.poll(Path(self._profile_home), self._client, _key(), self._llm,
                                   self._brief_sender)
             except Exception as exc:
                 logger.warning("[%s] Brief worker paused: %s", self.name, type(exc).__name__)
-            await asyncio.sleep(briefs.POLL_SECONDS)
+            try:
+                await asyncio.wait_for(self._brief_wake.wait(), timeout=briefs.POLL_SECONDS)
+            except TimeoutError:
+                pass
 
     async def _run(self) -> None:
         failures = 0

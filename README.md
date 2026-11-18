@@ -101,9 +101,17 @@ shorter notification and can recover the full brief from Hermes history.
 This setup needs the Hermes gateway and your native messaging connection, plus the MeetStream API
 key. The brief worker checks only queued bots. While a bot is in the meeting it checks about once a
 minute, then about every 15 seconds while waiting for the transcript. If the Mac is asleep or the
-gateway is offline, the checks resume when it is available. There is no public listener to set up.
-A workspace webhook can notify a public service sooner, but MeetStream makes one delivery attempt,
-so an event-driven deployment still needs a catch-up path.
+gateway is offline, the checks resume when it is available.
+
+For faster wake-ups with an existing HTTPS reverse proxy, install Hermes with messaging support
+(`aiohttp`) and set `platforms.meetstream.extra.brief_webhook_port` to an unused local port. Proxy
+only `POST /meetstream/briefs` to that loopback port. Register the HTTPS URL as a
+[MeetStream workspace webhook](https://docs.meetstream.ai/guides/webhooks/workspace-webhooks)
+and subscribe to `transcription.processed` and `bot.done`. Put the endpoint signing secret in
+`MEETSTREAM_BRIEF_WEBHOOK_SECRET` in the same Hermes profile and restart the gateway. The listener
+checks the raw-body signature, deduplicates events per bot, and wakes the worker only for a brief
+already in the queue. The worker reads bot and transcript state from MeetStream's API. Polling
+still handles restarts and missed webhooks.
 
 ## Google Meet status GIFs
 

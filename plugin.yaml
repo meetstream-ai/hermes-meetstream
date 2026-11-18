@@ -31,6 +31,10 @@ requires_env:
     password: true
     secret: true
 optional_env:
+  - name: MEETSTREAM_BRIEF_WEBHOOK_SECRET
+    description: "Signing secret for the optional MeetStream workspace webhook"
+    password: true
+    secret: true
   - name: MEETSTREAM_ALLOWED_USERS
     description: >-
       Display names of the people who may ask Hermes questions in the meeting chat, comma-separated,

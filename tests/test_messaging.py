@@ -194,3 +194,15 @@ class MobileBriefTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unconfirmed", recovered["state"])
         self.assertIn("error", other)
         self.assertEqual(send.await_count, 1)
+
+
+    async def test_native_deferred_attachment_is_not_replayed_by_the_brief_worker(self):
+        self.queue()
+        send = mock.AsyncMock(return_value=SimpleNamespace(
+            success=False, retry_after=30, raw_response={"deferred_upload": True},
+        ))
+        await briefs.poll(self.home, None, KEY, None, lambda _: send)
+        self.allow_now()
+        await briefs.poll(self.home, None, KEY, None, lambda _: send)
+        self.assertEqual(send.await_count, 1)
+        self.assertIn("unconfirmed", self.ledger.status(BOT, SESSION))
