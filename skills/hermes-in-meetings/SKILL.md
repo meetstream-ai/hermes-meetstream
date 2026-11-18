@@ -22,6 +22,19 @@ configured bot name (default "Hermes"), records it, and transcribes it.
 | `meetstream_transcript` | Speaker-labelled transcript (after the call) and the meeting chat. |
 | `meetstream_leave` | Make the bot leave now. Data is kept. |
 
+## What to do by default
+
+- Default to a bot that joins and records the call (`meetstream_join`). If the user's goal is
+  unclear, ask one question: notes after the call, or answers during the call (in the meeting
+  chat)?
+- A voice agent that talks in the meeting (MeetStream calls it MIA) is not part of this plugin.
+  Suggest it only when the user asks for an agent that speaks in the call. It is set up in the
+  MeetStream dashboard, in this order: MeetStream-managed keys (billed per hour), then the
+  user's own provider keys, then the user's own agent (for example Hermes) on their computer
+  through the MeetStream Agent Kit. Do not suggest the Agent Kit by default. If the user asks for
+  it, warn that meeting speech then reaches an agent with access to their computer, and that the
+  computer must stay on for the whole call.
+
 ## How a meeting goes
 
 1. **Join only when asked.** Join a call only when the user gives you the link and asks you to

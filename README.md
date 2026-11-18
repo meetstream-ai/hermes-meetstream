@@ -175,6 +175,12 @@ MeetStream bills the bot time and the transcription to your MeetStream account f
 Refer to <https://meetstream.ai/pricing>.
 If the account has no credit, `meetstream_join` tells Hermes to give you the top-up link: <https://app.meetstream.ai/billing>.
 
+## Voice answers in the call
+
+This plugin answers in the meeting chat. If you want an agent that talks in the call, use MIA, the MeetStream voice agent, which you set up in the MeetStream dashboard.
+MIA can use the keys of MeetStream (billed per hour), your own provider keys, or your own agent (for example Hermes) on your computer through the [MeetStream Agent Kit](https://github.com/meetstream-ai/agent-kit).
+With the Agent Kit, the speech of the meeting goes to an agent that has access to your computer, and your computer must stay on for the full call. Thus, use it only for calls with people that you trust.
+
 ## Hermes in Meetings or the MeetStream connector
 
 Hermes also has a MeetStream connector in its MCP catalog (`hermes mcp install meetstream`).
