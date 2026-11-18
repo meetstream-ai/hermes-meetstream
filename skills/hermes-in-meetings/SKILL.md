@@ -45,7 +45,8 @@ configured bot name (default "Hermes"), records it, and transcribes it.
 5. **Decision brief.** When the user asks for notes or a summary after the meeting, call
    `meetstream_join` once with `decision_brief: true`. This needs a saved private Hermes chat or
    an authorized Telegram or WhatsApp DM, transcription, and the MeetStream gateway in that profile.
-   Report the tool's brief status. Briefs always go back to the requesting chat, never a home channel.
+   Report the tool's brief status. When `decision_brief_queued` is true, acknowledge and end the turn.
+   The gateway worker handles the rest. Briefs go back to the requesting chat.
    A queued brief arrives in the original conversation after transcription, even if that
    gateway stops and later restarts. The brief cites transcript timestamps and lists decisions,
    actions with owners and deadlines when stated, and open questions. A host removing the bot

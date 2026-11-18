@@ -72,6 +72,8 @@ class MobileBriefTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 clear_session_vars(tokens)
         self.assertIn("Queued for this chat", result["decision_brief"])
+        self.assertTrue(result["decision_brief_queued"])
+        self.assertIn("finish this turn", result["next"])
         self.assertEqual(json.loads(self.ledger.due()[0]["origin"])["chat_id"], "12345")
 
     async def test_offline_then_restart_delivers_once_to_exact_chat_and_topic(self):

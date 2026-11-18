@@ -52,11 +52,19 @@ def is_meeting_turn(session_id: str = "", task_id: str = "") -> bool:
         return bool(hits)
 
 
-def on_pre_llm_call(session_id: str = "", task_id: str = "", platform: str = "", **_: Any) -> None:
+def on_pre_llm_call(session_id: str = "", task_id: str = "", platform: str = "", **_: Any) -> Optional[dict[str, str]]:
     """Fires once per turn, before any tool call: note the turns that come from meeting chat."""
     if _is_meetstream(platform):
         _remember(str(session_id or ""), str(task_id or ""))
-    return None
+        return None
+    return {"context": (
+        "For MeetStream meeting notes, call meetstream_join with decision_brief=true. "
+        "When decision_brief_queued is true, the durable gateway worker owns waiting, summarization "
+        "and delivery to the requesting chat. Acknowledge the queued brief and finish this turn. "
+        "Do not sleep, poll status, fetch the transcript or start a separate delegation to wait for "
+        "that queued brief. A later user request for status or a transcript can use those tools. "
+        "A pending chat artifact provides no evidence of live chat contents."
+    )}
 
 
 def on_pre_tool_call(tool_name: str = "", session_id: str = "", task_id: str = "",

@@ -82,7 +82,8 @@ JOIN_SCHEMA = _schema(
     "transcribes it. Returns at once with bot_id; the bot joins in the background (it may wait in the "
     "lobby until admitted). Use this tool directly for a supplied meeting link. Only MeetStream can "
     "report whether the bot joined. Reuse the returned bot_id if one is already on its way or in the call. "
-    "Only join calls the user asked you to join.",
+    "Only join calls the user asked you to join. When decision_brief_queued is true, acknowledge it "
+    "and end the turn; the gateway worker handles waiting and returns the brief automatically.",
     {"meeting_url": {"type": "string", "description": "Full https meeting link (zoom.us, meet.google.com, teams.microsoft.com)."},
      "join_at": {"type": "string", "description": "Optional ISO-8601 time to join later, e.g. 2026-11-13T15:00:00Z. Omit to join now."},
      "message": {"type": "string", "description": "Optional text added after the bot's recording notice."},
@@ -212,6 +213,7 @@ async def _join(args: dict, session_id: str, s: dict, event: calendar.Event | No
         try:
             queued = await asyncio.to_thread(ledger.queue, str(bot_id), session_id, briefs.meeting_status(state),
                                              start_check=event.start.timestamp() - 120 if event else None, origin=origin)
+            brief_info["decision_brief_queued"] = queued
             brief_info["decision_brief"] = (
                 "Queued for this chat after the transcript is ready." if queued
                 else "This bot already has a destination for its brief."
@@ -226,7 +228,10 @@ async def _join(args: dict, session_id: str, s: dict, event: calendar.Event | No
         "bot_name": name, "reused": reused,
         "joined": state in api.CHAT_READY,
         **({"transcription_requested": transcription != "none"} if not data.get("reused") else {}),
-        "next": ("MeetStream accepted this join time. Check meetstream_status for the eventual join outcome."
+        "next": ("Acknowledge that the brief is queued and finish this turn. The gateway worker will "
+                 "deliver it to this chat after the transcript is ready. No polling or delegation is needed."
+                 if brief_info.get("decision_brief_queued") else
+                 "MeetStream accepted this join time. Check meetstream_status for the eventual join outcome."
                  if state == "scheduled" else
                  "Check meetstream_status for the actual join outcome. Active means the request was accepted, "
                  "Joining means the bot is connecting, and InWaitingRoom means it needs admission."),
