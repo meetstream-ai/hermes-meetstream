@@ -140,11 +140,15 @@ class Briefs:
                               AND brief IS NULL AND state <> 'Transcript ready · preparing brief'""",
                               (time.time(), event_bit, bot_id, event_bit)).rowcount == 1
 
-    def defer(self, bot_id: str, state: str, delay: int = POLL_SECONDS, *, processing: bool = False):
+    def defer(self, row: dict, state: str, delay: int = POLL_SECONDS, *, processing: bool = False):
+        now = time.time()
         with self.db() as db:
-            db.execute("""UPDATE briefs SET state = ?, due = ?, processing_since = COALESCE(processing_since, ?)
+            # A webhook received after this poll took its snapshot owns the next due time.
+            db.execute("""UPDATE briefs SET state = ?,
+                          due = CASE WHEN webhook_events = ? THEN ? ELSE due END,
+                          processing_since = COALESCE(processing_since, ?)
                           WHERE bot_id = ? AND delivered = 0 AND brief IS NULL""",
-                       (state, time.time() + delay, time.time() if processing else None, bot_id))
+                       (state, row["webhook_events"], now + delay, now if processing else None, row["bot_id"]))
 
     def save(self, bot_id: str, content: str) -> str | None:
         with self.db() as db:
@@ -434,7 +438,7 @@ async def advance(store: Briefs, row: dict, client, key: str, llm, resolve_sende
         content = ("## Decision brief unavailable\n\n"
                    f"MeetStream status: {inline(str(api.field(status, 'status', 'Status', default=state)), 100)}.")
     elif state not in api.JOIN_FINISHED and state not in api.JOIN_FAILED:
-        await asyncio.to_thread(store.defer, bot_id, meeting_status(state), ACTIVE_POLL_SECONDS)
+        await asyncio.to_thread(store.defer, row, meeting_status(state), ACTIVE_POLL_SECONDS)
         return
     else:
         try:
@@ -446,13 +450,13 @@ async def advance(store: Briefs, row: dict, client, key: str, llm, resolve_sende
         else:
             if segments is None:
                 if row["processing_since"] is None or time.time() - row["processing_since"] < PROCESSING_TIMEOUT:
-                    await asyncio.to_thread(store.defer, bot_id, "Processing transcript", processing=True)
+                    await asyncio.to_thread(store.defer, row, "Processing transcript", processing=True)
                     return
                 content = "## Decision brief unavailable\n\nMeetStream did not produce a transcript within 30 minutes."
             else:
                 if not isinstance(segments, list):
                     raise ValueError("Unexpected transcript format")
-                await asyncio.to_thread(store.defer, bot_id, "Transcript ready · preparing brief", 60)
+                await asyncio.to_thread(store.defer, row, "Transcript ready · preparing brief", 60)
                 content = await summarize(llm, segments)
     brief = await asyncio.to_thread(store.save, bot_id, content)
     if brief is not None:
@@ -471,5 +475,5 @@ async def poll(home: Path, client, key: str, llm, resolve_sender=None):
             reason = "Waiting to retry"
             if isinstance(exc, api.MeetStreamError) and exc.status in (401, 403):
                 reason = "MeetStream access denied · waiting to retry"
-            await asyncio.to_thread(store.defer, row["bot_id"], reason, 60)
+            await asyncio.to_thread(store.defer, row, reason, 60)
             await asyncio.to_thread(store.retry_delivery, row["bot_id"])

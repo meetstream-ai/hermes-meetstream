@@ -1,7 +1,7 @@
 name: meetstream
 label: Hermes in Meetings
 kind: platform
-version: 0.7.0
+version: 0.7.1
 requires_hermes: ">=0.23.0"
 author: MeetStream
 description: >

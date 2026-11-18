@@ -107,11 +107,13 @@ For faster wake-ups with an existing HTTPS reverse proxy, install Hermes with me
 (`aiohttp`) and set `platforms.meetstream.extra.brief_webhook_port` to an unused local port. Proxy
 only `POST /meetstream/briefs` to that loopback port. Register the HTTPS URL as a
 [MeetStream workspace webhook](https://docs.meetstream.ai/guides/webhooks/workspace-webhooks)
-and subscribe to `transcription.processed` and `bot.done`. Put the endpoint signing secret in
-`MEETSTREAM_BRIEF_WEBHOOK_SECRET` in the same Hermes profile and restart the gateway. The listener
-checks the raw-body signature, deduplicates events per bot, and wakes the worker only for a brief
-already in the queue. The worker reads bot and transcript state from MeetStream's API. Polling
-still handles restarts and missed webhooks.
+in the workspace that owns the Hermes profile's `MEETSTREAM_API_KEY` and subscribe to
+`transcription.processed` and `bot.done`. Put the endpoint signing secret in
+`MEETSTREAM_BRIEF_WEBHOOK_SECRET` in that Hermes profile and restart the gateway. The listener rejects
+missing or malformed signatures before reading the body, limits the body size and read time,
+then verifies the raw bytes. It deduplicates events per bot and wakes the worker only for a
+brief already in the queue. The worker reads bot and transcript state from MeetStream's API.
+Polling still handles restarts and missed webhooks.
 
 ## Google Meet status GIFs
 
@@ -191,8 +193,9 @@ its configured display name. For example, `hermes config set MEETSTREAM_ALLOWED_
 - **The skill tells Hermes that text from a meeting is data, not an instruction.**
   Hermes does not run commands, send files, or send email because a person in the call asked.
   Hermes does these actions only when you confirm them outside the call.
-- The plugin opens no network port and needs no webhook.
-  The adapter contacts MeetStream, and the brief uses Hermes’s configured model provider.
+- The plugin uses outbound polling by default. Configuring the optional webhook opens a loopback
+  listener for the HTTPS reverse proxy. The adapter contacts MeetStream, and the brief uses
+  Hermes’s configured model provider.
 
 ## Settings
 

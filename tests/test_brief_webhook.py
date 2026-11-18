@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_plugin import plugin
 
@@ -43,9 +44,51 @@ class WebhookTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(wake.is_set())
             self.assertEqual([row["bot_id"] for row in ledger.due()], ["queued"])
 
-        ledger.defer("queued", "Processing transcript")
+        [queued] = ledger.due()
+        ledger.defer(queued, "Processing transcript")
         wake.clear()
         async with TestClient(TestServer(webhook.create_app(home, wake, secret))) as client:
             self.assertEqual(await post(client, body), 204)
             self.assertFalse(wake.is_set())
             self.assertEqual(ledger.due(), [])
+
+
+    async def test_invalid_signature_header_never_reads_body_and_slow_read_times_out(self):
+        try:
+            import aiohttp  # noqa: F401
+        except ImportError:
+            self.skipTest("Hermes messaging dependency aiohttp is unavailable")
+        from importlib import import_module
+
+        webhook = import_module(f"{plugin.__name__}.brief_webhook")
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        app = webhook.create_app(home, asyncio.Event(), "test-secret")
+        handler = next(iter(app.router.routes())).handler
+        request = mock.Mock(headers={}, read=mock.AsyncMock())
+        self.assertEqual((await handler(request)).status, 401)
+        request.headers = {"X-MeetStream-Signature": "sha256=bad"}
+        self.assertEqual((await handler(request)).status, 401)
+        request.read.assert_not_awaited()
+
+        async def stalled_body():
+            await asyncio.Event().wait()
+
+        request.headers = {"X-MeetStream-Signature": f"sha256={'0' * 64}"}
+        request.read.side_effect = stalled_body
+        with mock.patch.object(webhook, "_BODY_TIMEOUT", 0.01):
+            self.assertEqual((await handler(request)).status, 408)
+        request.read.assert_awaited_once()
+
+    def test_stale_poll_preserves_webhook_wake_across_restart(self):
+        ledger = plugin.tools.briefs.Briefs(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        ledger.prepare()
+        ledger.queue("queued", "session", "In meeting")
+        [snapshot] = ledger.due()
+        self.assertTrue(ledger.wake("queued", 2))
+        ledger.defer(snapshot, "Processing transcript", processing=True)
+        reopened = plugin.tools.briefs.Briefs(ledger.home)
+        [woken] = reopened.due()
+        self.assertEqual(woken["webhook_events"], 2)
+        self.assertIsNotNone(woken["processing_since"])
+        reopened.defer(woken, "Processing transcript", processing=True)
+        self.assertEqual(reopened.due(), [])

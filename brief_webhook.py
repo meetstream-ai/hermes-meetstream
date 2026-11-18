@@ -18,6 +18,8 @@ _POST_CALL_EVENTS = {
     "transcription.failed": 8,
 }
 _MAX_BODY = 64 * 1024
+_BODY_TIMEOUT = 3
+_SIGNATURE = re.compile(r"sha256=[a-fA-F0-9]{64}")
 
 
 def create_app(home: Path, wake: asyncio.Event, secret: str):
@@ -29,10 +31,16 @@ def create_app(home: Path, wake: asyncio.Event, secret: str):
     store = Briefs(home)
 
     async def receive(request):
-        raw = await request.read()
         signature = request.headers.get("X-MeetStream-Signature", "")
+        if not _SIGNATURE.fullmatch(signature):
+            return web.Response(status=401)
+        try:
+            async with asyncio.timeout(_BODY_TIMEOUT):
+                raw = await request.read()
+        except TimeoutError:
+            return web.Response(status=408)
         expected = "sha256=" + hmac.new(key, raw, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature.encode("utf-8"), expected.encode("ascii")):
+        if not hmac.compare_digest(signature.lower(), expected):
             return web.Response(status=401)
         try:
             event = json.loads(raw)
