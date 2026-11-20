@@ -748,6 +748,11 @@ class TestMeetingGuard(unittest.TestCase):
         for sid in ("s-cli", "s-tg", "", "unknown"):
             self.assertIsNone(guard.on_pre_tool_call(tool_name="terminal", session_id=sid))
 
+    def test_meeting_requests_are_directed_to_the_registered_runtime_skill(self):
+        context = guard.on_pre_llm_call(session_id="private-chat", platform="telegram")
+        self.assertIn('skill_view("meetstream:hermes-in-meetings")', context["context"])
+        self.assertIsNone(guard.on_pre_llm_call(session_id="in-call", platform="meetstream"))
+
     def test_tracking_is_bounded(self):
         for i in range(guard._MAX_TRACKED + 50):
             guard.on_pre_llm_call(session_id=f"s{i}", platform="meetstream")

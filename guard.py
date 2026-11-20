@@ -58,7 +58,8 @@ def on_pre_llm_call(session_id: str = "", task_id: str = "", platform: str = "",
         _remember(str(session_id or ""), str(task_id or ""))
         return None
     return {"context": (
-        "For MeetStream meeting notes, call meetstream_join with decision_brief=true. "
+        'For MeetStream meeting requests, load skill_view("meetstream:hermes-in-meetings") '
+        "when available. Look up completed meetings and use decision_brief=true for requested notes on a new join. "
         "When decision_brief_queued is true, the durable gateway worker owns waiting, summarization "
         "and delivery to the requesting chat. Acknowledge the queued brief and finish this turn. "
         "Do not sleep, poll status, fetch the transcript or start a separate delegation to wait for "
