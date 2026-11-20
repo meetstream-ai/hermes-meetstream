@@ -206,6 +206,27 @@ class CalendarTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bounds[1] - bounds[0], timedelta(hours=25))
 
 
+    async def test_caption_only_calendar_event_can_schedule_recording_without_promising_a_brief(self):
+        self.config["transcription"] = "meeting_captions"
+        self.event_records = [event("review", self.future)]
+        blocked = await self.preview("review")
+        self.assertIn("error", blocked)
+        self.assertNotIn("preview_token", blocked)
+        allowed = await self.preview("review", decision_brief=False)
+        self.assertIn("captions", allowed["preview"]["output"])
+
+    async def test_search_uses_meetstream_epoch_start_and_creation_dates(self):
+        self.bots = [
+            {"BotID": "started", "Status": "Done", "BotUsername": "Hermes",
+             "StartTime": int(self.past.timestamp()), "CreatedAt": 1},
+            {"BotID": "created", "Status": "Done", "BotUsername": "Hermes",
+             "CreatedAt": str(int(self.past.timestamp()))},
+        ]
+        result = await self.tool(tools.handle_find_meetings, self.options(self.past))
+        self.assertEqual({item["bot_id"]: item["date_source"] for item in result["matches"]},
+                         {"started": "meeting_start", "created": "bot_created"})
+
+    @unittest.skipUnless(tools.messaging.capture_private_origin, "Hermes private delivery SDK is unavailable")
     async def test_telegram_calendar_search_and_approved_schedule_keep_the_original_route(self):
         with SessionDB(self.home / "state.db") as db:
             db.create_session("telegram-origin", source="telegram")

@@ -82,7 +82,8 @@ configured bot name (default "Hermes"), records it, and transcribes it.
 - Do not post the user's private information (other meetings, emails, files) into a meeting chat.
 - Summaries quote people accurately and name who said what. Mark anything you infer as inferred.
 - For 401, ask the user to check `MEETSTREAM_API_KEY` (https://app.meetstream.ai/api-key).
-  For 403, report the MeetStream error and ask the user to verify the relevant workspace or bot access.
+  For a low-credit response, give the user the billing link from the tool and wait until they add credit.
+  For other 403 responses, report the MeetStream error and ask the user to verify the workspace or bot access.
 
 ## What is set in MeetStream, not here
 

@@ -55,6 +55,7 @@ class FakeMeetStream:
         self.transcript_responses: list[httpx.Response] = []
         self.requests: list[httpx.Request] = []
         self.reject_key = False
+        self.create_error: httpx.Response | None = None
         self.list_error = 0
         self.chat_send_error_after: int | None = None
         self.page_size = 50
@@ -80,6 +81,8 @@ class FakeMeetStream:
         path = request.url.path.removeprefix("/api/v1")
         parts = path.strip("/").split("/")
         if path == "/bots/create_bot":
+            if self.create_error is not None:
+                return self.create_error
             body = json.loads(request.content)
             retry_key = request.headers.get("Idempotency-Key")
             if retry_key in self.join_keys:
@@ -191,7 +194,7 @@ class TestAddressing(unittest.TestCase):
 class TestPayload(unittest.TestCase):
     def test_join_payload_tags_bot_and_sets_safe_leave_timeouts(self):
         p = api.build_join_payload("https://meet.google.com/abc-defg-hij", bot_name="Hermes", message="hi")
-        self.assertEqual(p["custom_attributes"], {"hermes": True})
+        self.assertEqual(p["custom_attributes"], {"hermes": True, api.BRIEF_TRANSCRIPTION_ATTR: True})
         self.assertEqual(p["automatic_leave"]["everyone_left_timeout"], 60)
         self.assertEqual(p["recording_config"]["transcript"]["provider"], {"meetstream": {"language": "auto", "translate": False}})
         self.assertFalse(p["video_required"])
@@ -225,6 +228,21 @@ class TestPayload(unittest.TestCase):
 
 
 class TestTools(PluginTestCase):
+    def test_create_error_preserves_provider_message_and_retry_delay(self):
+        self.fake.create_error = httpx.Response(
+            429, headers={"Retry-After": "37"},
+            json={"error": "rate_limit_exceeded", "message": "Too many bots created"},
+        )
+        out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
+        self.assertEqual(out["status_code"], 429)
+        self.assertEqual(out["error"], "Too many bots created (retry after 37 s)")
+
+    def test_low_credit_join_error_links_to_billing(self):
+        self.fake.create_error = httpx.Response(403, json={"message": "Low credits please recharge"})
+        out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
+        self.assertEqual(out["status_code"], 403)
+        self.assertIn(api.BILLING_URL, out["hint"])
+
     def test_join_creates_tagged_bot_and_hands_it_to_the_adapter(self):
         out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
         self.assertEqual(out["bot_id"], "bot-new")
@@ -322,6 +340,55 @@ class TestTools(PluginTestCase):
         out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
         self.assertEqual(out["transcript_state"], "pending")
         self.assertIsNone(out["untrusted_meeting_content"]["transcript"])
+
+    def test_malformed_bot_list_stops_join_without_creating_a_duplicate(self):
+        def respond(request):
+            if request.method == "GET":
+                return httpx.Response(200, json={"bots": {"unexpected": "object"}})
+            raise AssertionError("Must confirm bot list before creating a bot")
+
+        with mock.patch.object(api, "new_client", side_effect=lambda: httpx.AsyncClient(
+            base_url=api.BASE_URL, transport=httpx.MockTransport(respond)
+        )):
+            result = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
+        self.assertIn("unexpected bot list", result["error"])
+
+    def test_billing_conflict_is_pending_rather_than_permanently_unavailable(self):
+        self.fake.add_bot("b1", status="Done")
+        self.fake.bots["b1"]["detail"] = {"transcript_id": "t1"}
+        self.fake.transcript_responses = [httpx.Response(
+            409, json={"error": "Session billing is still in progress. Retry after the meeting is billed."}
+        )]
+        out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
+        self.assertEqual(out["transcript_state"], "pending")
+
+    def test_pending_primary_uses_completed_retranscription(self):
+        segments = [{"speaker": "Priya", "transcript": "We approved the plan.", "start_time": 12}]
+
+        def respond(request):
+            path = request.url.path.removeprefix("/api/v1")
+            if path == "/bots/b1/detail":
+                return httpx.Response(200, json={"bot_details": {"transcript_id": "primary"}})
+            if path == "/transcript/primary/get_transcript":
+                return httpx.Response(202)
+            if path == "/bots/b1/transcriptions":
+                return httpx.Response(200, json={"transcriptions": [
+                    {"provider": "meetstream", "transcript_id": "primary", "status": "Not started"},
+                    {"provider": "meeting_captions", "transcript_id": None, "status": "Success"},
+                    {"provider": "deepgram", "transcript_id": "stale", "status": "Success"},
+                    {"provider": "deepgram", "transcript_id": "recovered", "status": "Success"},
+                ]})
+            if path == "/transcript/stale/get_transcript":
+                return httpx.Response(404)
+            if path == "/transcript/recovered/get_transcript":
+                return httpx.Response(200, json=segments)
+            raise AssertionError(path)
+
+        async def read():
+            async with httpx.AsyncClient(base_url=api.BASE_URL, transport=httpx.MockTransport(respond)) as client:
+                return await api.transcript(client, KEY, "b1")
+
+        self.assertEqual(self.run_async(read()), ("recovered", segments))
 
     def test_empty_transcript_and_pending_chat_are_distinct(self):
         self.fake.add_bot("b1", status="Done")

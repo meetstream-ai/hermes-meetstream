@@ -8,21 +8,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from aiohttp.test_utils import TestClient, TestServer
+
 from test_plugin import plugin
 
 
 class WebhookTests(unittest.IsolatedAsyncioTestCase):
     async def test_signed_event_wakes_one_queued_bot_once_after_restart(self):
-        try:
-            from aiohttp.test_utils import TestClient, TestServer
-        except ImportError:
-            self.skipTest("Hermes messaging dependency aiohttp is unavailable")
         from importlib import import_module
 
         webhook = import_module(f"{plugin.__name__}.brief_webhook")
         home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         ledger = webhook.Briefs(home)
-        ledger.prepare()
+        with ledger.db() as db:
+            db.execute("ALTER TABLE briefs ADD COLUMN origin TEXT")
+            db.execute("ALTER TABLE briefs ADD COLUMN send_started INTEGER NOT NULL DEFAULT 0")
         ledger.queue("queued", "session", "In meeting", start_check=4_000_000_000)
         ledger.queue("other", "session", "Scheduled", start_check=4_000_000_000)
         wake = asyncio.Event()
@@ -54,10 +54,6 @@ class WebhookTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_invalid_signature_header_never_reads_body_and_slow_read_times_out(self):
-        try:
-            import aiohttp  # noqa: F401
-        except ImportError:
-            self.skipTest("Hermes messaging dependency aiohttp is unavailable")
         from importlib import import_module
 
         webhook = import_module(f"{plugin.__name__}.brief_webhook")

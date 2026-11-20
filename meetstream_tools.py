@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,8 @@ from hermes_constants import get_hermes_home
 
 from . import briefs, calendar_events as calendar, messaging
 from . import meetstream_client as api
+
+logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "meetstream"
 TRANSCRIPT_POLL_SECONDS = 15
@@ -52,7 +55,9 @@ def _ok(data: dict) -> str:
 def _err(e: Exception) -> str:
     if isinstance(e, api.MeetStreamError):
         out = {"error": e.detail, "status_code": e.status}
-        if e.status == 401:
+        if e.status in (402, 403) and "low credits" in e.detail.casefold():
+            out["hint"] = f"Add prepaid credit at {api.BILLING_URL} before retrying."
+        elif e.status == 401:
             out["hint"] = "The MeetStream API key was rejected. Check MEETSTREAM_API_KEY (app.meetstream.ai/api-key)."
         elif e.status == 403:
             out["hint"] = "MeetStream denied this request. Check the response detail, workspace and access to the bot."
@@ -165,6 +170,11 @@ async def handle_join(args: dict, *, session_id: str = "", **_: Any) -> str:
     return await _join(args, session_id, settings())
 
 
+def _check_brief_provider(provider: str) -> None:
+    if provider not in api.BRIEF_TRANSCRIPTION_PROVIDERS:
+        raise ValueError("Select MeetStream, Deepgram or AssemblyAI to generate an automatic decision brief.")
+
+
 async def _join(args: dict, session_id: str, s: dict, event: calendar.Event | None = None) -> str:
     from . import adapter
 
@@ -177,12 +187,14 @@ async def _join(args: dict, session_id: str, s: dict, event: calendar.Event | No
     want_brief = args.get("decision_brief") is True
     home = get_hermes_home()
     try:
-        if want_brief and transcription == "none":
-            raise ValueError("Enable a transcription provider before requesting an automatic decision brief.")
+        if want_brief:
+            _check_brief_provider(transcription)
         origin = None
         if want_brief:
             source = await asyncio.to_thread(briefs.session_source, home, session_id)
             if source not in briefs.LOCAL_SESSIONS:
+                if source in messaging.PLATFORMS and messaging.capture_private_origin is None:
+                    raise ValueError("Automatic mobile briefs require a Hermes build with the private delivery SDK.")
                 origin = messaging.capture_origin(session_id, source)
                 if not origin:
                     raise ValueError("Automatic decision briefs require a saved private Hermes chat or an authorized Telegram or WhatsApp DM.")
@@ -201,7 +213,15 @@ async def _join(args: dict, session_id: str, s: dict, event: calendar.Event | No
         if gif_enabled:
             payload["custom_attributes"][api.GIF_ATTR] = True
         async with api.new_client() as client:
-            data = await api.create_bot(client, api_key(), payload)
+            key = api_key()
+            data = await api.create_bot(client, key, payload)
+            transcription_verified = True
+            if ledger and data.get("bot_id") and data.get("reused"):
+                try:
+                    transcription_verified = await api.verify_reused_transcription(client, key, data)
+                except api.MeetStreamError as exc:
+                    logger.warning("Could not verify reused bot transcription: HTTP %s", exc.status)
+                    transcription_verified = None
     except (ValueError, OSError, sqlite3.Error, api.MeetStreamError) as e:
         return _err(e)
     bot_id = api.field(data, "bot_id")
@@ -216,15 +236,28 @@ async def _join(args: dict, session_id: str, s: dict, event: calendar.Event | No
     if state not in api.JOIN_FINISHED:
         adapter.watch(bot_id, status_gifs=gif_enabled)
     brief_info = {}
-    if ledger:
+    if ledger and transcription_verified is not True:
+        brief_info["decision_brief_queued"] = False
+        brief_info["decision_brief"] = (
+            "The active bot was started without a post-call transcription provider."
+            if transcription_verified is False else
+            "Hermes could not verify post-call transcription for the active bot."
+        )
+    elif ledger:
         try:
-            queued = await asyncio.to_thread(ledger.queue, str(bot_id), session_id, briefs.meeting_status(state),
-                                             start_check=event.start.timestamp() - 120 if event else None, origin=origin)
-            brief_info["decision_brief_queued"] = queued
-            brief_info["decision_brief"] = (
-                "Queued for this chat after the transcript is ready." if queued
-                else "This bot already has a destination for its brief."
-            )
+            job = await asyncio.to_thread(ledger.queue, str(bot_id), session_id, briefs.meeting_status(state),
+                                          start_check=event.start.timestamp() - 120 if event else None, origin=origin)
+            brief_info["decision_brief_queued"] = False
+            if job is None:
+                brief_info["decision_brief"] = "This bot already has a destination for its brief."
+            else:
+                saved_state, finished = job
+                brief_info["decision_brief_status"] = saved_state
+                brief_info["decision_brief_queued"] = not finished
+                brief_info["decision_brief"] = (
+                    "The brief job for this chat already finished. Check its saved status."
+                    if finished else "Queued for this chat after the transcript is ready."
+                )
         except (OSError, sqlite3.Error):
             brief_info["decision_brief"] = "Could not save delivery for this bot. Retry with the same meeting link."
     return _ok({
@@ -545,12 +578,13 @@ async def handle_calendar(args: dict, *, session_id: str = "", **_: Any) -> str:
         config = settings()
         want_brief = args.get("decision_brief", True) is True
         provider = config["transcription"]
-        if want_brief and provider == "none":
-            raise ValueError("Enable transcription in the plugin before requesting a decision brief.")
+        if want_brief:
+            _check_brief_provider(provider)
         gifs = args.get("status_gifs", config.get("status_gifs")) is True and calendar.is_google_meet(event.meeting_url)
         destination = "this Telegram chat" if source == "telegram" else "this Hermes chat"
         output = (f"Timestamped decision brief in {destination}" if want_brief else
-                  "Recording" if provider == "none" else "Recording and transcript")
+                  "Recording" if provider == "none" else
+                  "Recording and meeting captions" if provider == "meeting_captions" else "Recording and transcript")
         plan = {
             "event_id": event.event_id, "date": date_text, "zone": zone_name,
             "title": event.title, "start": event.start.isoformat(), "time_zone": event.timezone, "output": output,

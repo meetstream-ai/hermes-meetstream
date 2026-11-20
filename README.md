@@ -72,7 +72,9 @@ The bot leaves when all the other people leave the call.
 ## Get a decision brief after the call
 
 In a private Hermes Desktop chat, say “Join this call and send me a decision brief when the bot leaves.”
-A successful join tells you that the brief was queued in that conversation. Ask for the bot status
+Automatic briefs require MeetStream, Deepgram, or AssemblyAI transcription. Hermes checks the active
+bot's transcription before queueing a brief on a reused bot. A successful join tells you whether
+the brief was queued in that conversation. Ask for the bot status
 if you want to check admission, recording or transcript processing. The brief lists decisions,
 actions and open questions with speaker names and timestamps relative to the transcript. Missing
 owners and deadlines are called out explicitly.
@@ -83,6 +85,8 @@ Open the original chat to read the brief once it is ready. Other chats and the m
 receive it. MeetStream may need a few minutes to process the transcript.
 
 ### Get the brief on Telegram or WhatsApp
+
+Automatic phone delivery requires a Hermes build with the private delivery SDK.
 
 Connect a native [Telegram](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram)
 or [WhatsApp](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/whatsapp) gateway
@@ -269,7 +273,9 @@ The plugin uses your MeetStream API key at `https://api.meetstream.ai`. For requ
 - The plugin starts no shell commands and sends no telemetry.
 - The plugin does not update itself.
 
-MeetStream bills the bot time and the transcription to your MeetStream account.
+MeetStream bills bot time and transcription to your MeetStream account. If a join fails because
+the account is out of credit, add prepaid credit in the [MeetStream billing dashboard](https://app.meetstream.ai/billing)
+before retrying.
 Refer to <https://meetstream.ai/pricing>.
 
 ## Hermes in Meetings or the MeetStream connector
@@ -282,7 +288,7 @@ skill and gateway adapter. Installing both gives Hermes two sets of meeting tool
 
 ```bash
 git clone https://github.com/NousResearch/hermes-agent
-cd hermes-agent && uv sync && cd ..
+cd hermes-agent && uv sync --extra messaging && cd ..
 PYTHONPATH=hermes-agent hermes-agent/.venv/bin/python -m unittest discover -s hermes-meetstream/tests -v
 hermes-agent/.venv/bin/hermes plugins validate hermes-meetstream
 ```

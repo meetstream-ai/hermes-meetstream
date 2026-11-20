@@ -24,6 +24,7 @@ ACTIVE_POLL_SECONDS = 60
 MAX_SOURCE_CHARS = 10_000
 MAX_BATCHES = 20
 PROCESSING_TIMEOUT = 30 * 60
+MAX_GENERATION_ATTEMPTS = 3
 SEND_TIMEOUT = 90
 DELIVERY_UNCONFIRMED = "Delivery unconfirmed · brief saved in Hermes history"
 
@@ -61,17 +62,22 @@ class Briefs:
 
     def prepare(self):
         self.path.touch(mode=0o600, exist_ok=True)
+        migrations = {
+            "origin": "TEXT",
+            "send_started": "INTEGER NOT NULL DEFAULT 0",
+            "message_id": "TEXT",
+            "webhook_events": "INTEGER NOT NULL DEFAULT 0",
+            "generation_failures": "INTEGER NOT NULL DEFAULT 0",
+        }
         with self.db() as db:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(briefs)")}
+            if migrations.keys() <= columns:
+                return
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(briefs)")}
-            if "origin" not in columns:
-                db.execute("ALTER TABLE briefs ADD COLUMN origin TEXT")
-            if "send_started" not in columns:
-                db.execute("ALTER TABLE briefs ADD COLUMN send_started INTEGER NOT NULL DEFAULT 0")
-            if "message_id" not in columns:
-                db.execute("ALTER TABLE briefs ADD COLUMN message_id TEXT")
-            if "webhook_events" not in columns:
-                db.execute("ALTER TABLE briefs ADD COLUMN webhook_events INTEGER NOT NULL DEFAULT 0")
+            for name, declaration in migrations.items():
+                if name not in columns:
+                    db.execute(f"ALTER TABLE briefs ADD COLUMN {name} {declaration}")
 
     @contextmanager
     def db(self):
@@ -88,16 +94,14 @@ class Briefs:
             connection.close()
 
     def queue(self, bot_id: str, session_id: str, state: str, *, start_check: float | None = None,
-              origin: dict | None = None) -> bool:
+              origin: dict | None = None) -> tuple[str, bool] | None:
+        """Return the same chat's current state and completion flag after admitting the job."""
         due = max(time.time(), start_check or 0)
         with self.db() as db:
-            if origin:
-                db.execute("INSERT OR IGNORE INTO briefs(bot_id, session_id, state, due, origin) VALUES (?, ?, ?, ?, ?)",
-                           (bot_id, session_id, state, due, json.dumps(origin)))
-            else:
-                db.execute("INSERT OR IGNORE INTO briefs(bot_id, session_id, state, due) VALUES (?, ?, ?, ?)",
-                           (bot_id, session_id, state, due))
-            return db.execute("SELECT session_id FROM briefs WHERE bot_id = ?", (bot_id,)).fetchone()[0] == session_id
+            db.execute("INSERT OR IGNORE INTO briefs(bot_id, session_id, state, due, origin) VALUES (?, ?, ?, ?, ?)",
+                       (bot_id, session_id, state, due, json.dumps(origin) if origin else None))
+            row = db.execute("SELECT session_id, state, delivered FROM briefs WHERE bot_id = ?", (bot_id,)).fetchone()
+            return (row["state"], bool(row["delivered"])) if row["session_id"] == session_id else None
 
     def status(self, bot_id: str, session_id: str) -> str | None:
         if not self.path.is_file() or not session_id:
@@ -140,15 +144,18 @@ class Briefs:
                               AND brief IS NULL AND state <> 'Transcript ready · preparing brief'""",
                               (time.time(), event_bit, bot_id, event_bit)).rowcount == 1
 
-    def defer(self, row: dict, state: str, delay: int = POLL_SECONDS, *, processing: bool = False):
+    def defer(self, row: dict, state: str, delay: int = POLL_SECONDS, *,
+              processing: bool = False, generation_failed: bool = False):
         now = time.time()
         with self.db() as db:
             # A webhook received after this poll took its snapshot owns the next due time.
             db.execute("""UPDATE briefs SET state = ?,
                           due = CASE WHEN webhook_events = ? THEN ? ELSE due END,
-                          processing_since = COALESCE(processing_since, ?)
+                          processing_since = COALESCE(processing_since, ?),
+                          generation_failures = generation_failures + ?
                           WHERE bot_id = ? AND delivered = 0 AND brief IS NULL""",
-                       (state, row["webhook_events"], now + delay, now if processing else None, row["bot_id"]))
+                       (state, row["webhook_events"], now + delay, now if processing else None,
+                        generation_failed, row["bot_id"]))
 
     def save(self, bot_id: str, content: str) -> str | None:
         with self.db() as db:
@@ -347,6 +354,12 @@ def unique_actions(actions: list[tuple]) -> list[tuple]:
     return merged
 
 
+def cited_phrase(value: str, passage: str) -> bool:
+    phrase = " ".join(re.findall(r"\w+", value.casefold()))
+    words = " ".join(re.findall(r"\w+", passage.casefold()))
+    return bool(phrase) and f" {phrase} " in f" {words} "
+
+
 async def summarize(llm, segments: list) -> str:
     refs = evidence(segments)
     if not refs:
@@ -364,6 +377,7 @@ async def summarize(llm, segments: list) -> str:
     if batch:
         batches.append(batch)
     unsupported = 0
+    unsupported_details = False
     for batch in batches[:MAX_BATCHES]:
         result = await llm.acomplete_structured(
             instructions=("Extract explicit decisions, action items, and unresolved questions from the numbered "
@@ -372,7 +386,8 @@ async def summarize(llm, segments: list) -> str:
                           "text, ref (integer fragment ID), and quote (an exact supporting excerpt from that fragment). "
                           "Return every explicitly assigned task, including third-person commitments such as ‘Priya "
                           "will send the draft Thursday’, even when several tasks share one fragment. Keep the explicit "
-                          "owner and deadline in owner and due, or use null if missing. Include only actual questions, "
+                          "owner and deadline in owner and due, or use null if missing. Keep their original wording. "
+                          "Include only actual questions, "
                           "and skip announcements that a question follows. "
                           "Combine restatements of the same decision, action, or question into one item. "
                           "For each, cite the fragment that directly establishes it. Use short action descriptions "
@@ -395,9 +410,22 @@ async def summarize(llm, segments: list) -> str:
                 if not normalized_quote or normalized_quote not in " ".join(speech.split()).casefold():
                     unsupported += 1
                     continue
-                owner, due = item.get("owner"), item.get("due")
-                target.append((inline(text, 400), owner if isinstance(owner, str) else "",
-                               due if isinstance(due, str) else "", f"{timestamp(at)} · {inline(speaker, 100)}"))
+                owner, due = "", ""
+                if key == "actions":
+                    proposed_owner = item.get("owner")
+                    proposed_due = item.get("due")
+                    if isinstance(proposed_owner, str) and proposed_owner.strip():
+                        first_person = re.search(r"\b(?:i|my)\b", speech, re.I)
+                        if cited_phrase(proposed_owner, speech) or (first_person and cited_phrase(proposed_owner, speaker)):
+                            owner = proposed_owner
+                        else:
+                            unsupported_details = True
+                    if isinstance(proposed_due, str) and proposed_due.strip():
+                        if cited_phrase(proposed_due, speech):
+                            due = proposed_due
+                        else:
+                            unsupported_details = True
+                target.append((inline(text, 400), owner, due, f"{timestamp(at)} · {inline(speaker, 100)}"))
     sections["actions"] = unique_actions(sections["actions"])
     lines = ["## Decision brief", "", "Meeting status: bot left · transcript ready.",
              "", "Source: recorded speech. Timestamps are relative to the transcript."]
@@ -416,6 +444,8 @@ async def summarize(llm, segments: list) -> str:
             lines.append("- None identified.")
     if unsupported:
         lines.extend(("", "Some proposed items were omitted because their supporting quotes could not be verified."))
+    if unsupported_details:
+        lines.extend(("", "Some proposed owners or due dates could not be verified from the cited transcript."))
     if len(batches) > MAX_BATCHES:
         lines.extend(("", "This brief covers the transcript through " +
                       timestamp(refs[max(batches[MAX_BATCHES - 1]) - 1][0]) + "."))
@@ -454,10 +484,20 @@ async def advance(store: Briefs, row: dict, client, key: str, llm, resolve_sende
                     return
                 content = "## Decision brief unavailable\n\nMeetStream did not produce a transcript within 30 minutes."
             else:
-                if not isinstance(segments, list):
-                    raise ValueError("Unexpected transcript format")
                 await asyncio.to_thread(store.defer, row, "Transcript ready · preparing brief", 60)
-                content = await summarize(llm, segments)
+                try:
+                    if not isinstance(segments, list):
+                        raise ValueError("Unexpected transcript format")
+                    content = await summarize(llm, segments)
+                except Exception as exc:
+                    logger.warning("Decision brief %s generation failed: %s", bot_id, type(exc).__name__)
+                    if row["generation_failures"] + 1 < MAX_GENERATION_ATTEMPTS:
+                        await asyncio.to_thread(store.defer, row, "Brief generation failed · waiting to retry",
+                                                60, generation_failed=True)
+                        return
+                    content = ("## Decision brief unavailable\n\n"
+                               "The transcript is available, but Hermes could not generate a brief after "
+                               f"{MAX_GENERATION_ATTEMPTS} attempts. Ask for the transcript to review the meeting.")
     brief = await asyncio.to_thread(store.save, bot_id, content)
     if brief is not None:
         await deliver(store, row, brief, resolve_sender)
@@ -467,6 +507,7 @@ async def poll(home: Path, client, key: str, llm, resolve_sender=None):
     store = Briefs(home)
     if not store.path.is_file():
         return
+    await asyncio.to_thread(store.prepare)
     for row in await asyncio.to_thread(store.due):
         try:
             await advance(store, row, client, key, llm, resolve_sender)

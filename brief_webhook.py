@@ -56,7 +56,12 @@ def create_app(home: Path, wake: asyncio.Event, secret: str):
             wake.set()
         return web.Response(status=204)
 
+    async def prepare_ledger(_app):
+        if store.path.is_file():
+            await asyncio.to_thread(store.prepare)
+
     app = web.Application(client_max_size=_MAX_BODY)
+    app.on_startup.append(prepare_ledger)
     app.router.add_post("/meetstream/briefs", receive)
     return app
 

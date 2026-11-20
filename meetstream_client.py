@@ -20,10 +20,12 @@ import httpx
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.meetstream.ai/api/v1"
+BILLING_URL = "https://app.meetstream.ai/billing"
 TIMEOUT_S = 20.0
 MAX_LIST_PAGES = 4
 MAX_CHAT = 2000  # send_message rejects longer bodies (SendMessageRequest.maxLength)
 JOIN_ATTR = "hermes_join_target"
+BRIEF_TRANSCRIPTION_ATTR = "hermes_post_call_transcription"
 GIF_ATTR = "hermes_status_gifs"
 GIF_DURATION = 10
 EVENT_ATTR = "hermes_calendar_event_id"
@@ -39,6 +41,8 @@ ENDED = frozenset({"stopped", "kicked", "notallowed", "denied", "error", "done",
                    "cancelled", "removed", "mediaexpired"})
 JOIN_FINISHED = ENDED | {"mediaprocessing", "audioprocessing", "videoprocessing", "uploading", "transcriptionready"}
 JOIN_FAILED = frozenset({"notallowed", "denied", "error", "failed", "cancelled", "recordingpermissiondenied"})
+
+BRIEF_TRANSCRIPTION_PROVIDERS = frozenset({"meetstream", "deepgram", "assemblyai"})
 
 TRANSCRIPTION_PROVIDERS = {
     "meetstream": {"meetstream": {"language": "auto", "translate": False}},
@@ -76,7 +80,7 @@ def _detail(resp: httpx.Response) -> str:
     except ValueError:
         return resp.text[:200]
     if isinstance(data, dict):
-        for key in ("detail", "error", "message"):
+        for key in ("message", "error", "detail"):
             if data.get(key):
                 return str(data[key])[:200]
     return str(data)[:200]
@@ -106,7 +110,11 @@ async def request(client: httpx.AsyncClient, key: str, method: str, path: str, *
             raise MeetStreamError(507, "MeetStream did not return the original bot ID")
         return {**data, "reused": True}
     if resp.status_code >= 400:
-        raise MeetStreamError(resp.status_code, _detail(resp))
+        detail = _detail(resp)
+        retry_after = resp.headers.get("Retry-After", "").strip()
+        if retry_after.isascii() and retry_after.isdecimal():
+            detail += f" (retry after {retry_after} s)"
+        raise MeetStreamError(resp.status_code, detail)
     if not resp.content:
         return {}
     try:
@@ -175,7 +183,10 @@ def build_join_payload(meeting_url: str, *, bot_name: str, message: str = "", jo
         "meeting_link": validate_meeting_url(meeting_url),
         "bot_name": bot_name,
         "video_required": False,
-        "custom_attributes": {HERMES_ATTR: True},
+        "custom_attributes": {
+            HERMES_ATTR: True,
+            BRIEF_TRANSCRIPTION_ATTR: transcription in BRIEF_TRANSCRIPTION_PROVIDERS,
+        },
         "automatic_leave": dict(AUTOMATIC_LEAVE),
     }
     if message:
@@ -266,6 +277,8 @@ async def create_bot(client, key, payload: dict) -> dict:
     body = {**payload, "custom_attributes": {**payload["custom_attributes"], JOIN_ATTR: target}}
     for _ in range(MAX_LIST_PAGES):
         result = await request(client, key, "POST", "/bots/create_bot", body=body, idempotency_key=retry_key)
+        if not isinstance(result, dict):
+            raise MeetStreamError(0, "MeetStream returned an unexpected join response. Check bot status before retrying.")
         if not result.get("reused") or norm_status(result.get("status")) not in JOIN_FINISHED:
             return result
         # The create endpoint can see an ended bot before it is visible in the list.
@@ -289,12 +302,15 @@ async def bot_pages(client, key, params: dict):
     seen_cursors = set()
     for _ in range(MAX_LIST_PAGES):
         data = await list_bots(client, key, params)
+        records = data.get("bots") if isinstance(data, dict) else None
+        if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+            raise MeetStreamError(0, "MeetStream returned an unexpected bot list. Try again later.")
         more = bool(data.get("hasNextPage"))
-        yield [r for r in (data.get("bots") or []) if isinstance(r, dict)], more
+        yield records, more
         if not more:
             return
         cursor = data.get("nextCursor")
-        if not cursor or cursor in seen_cursors:
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
             raise MeetStreamError(0, "MeetStream bot list did not provide a fresh cursor")
         seen_cursors.add(cursor)
         params = {**params, "cursor": cursor}
@@ -337,14 +353,56 @@ async def remove_bot(client, key, bot_id: str) -> dict:
     return await request(client, key, "GET", bot_path(bot_id, "remove_bot"))
 
 
+async def verify_reused_transcription(client, key, bot: dict) -> bool | None:
+    """Read the original bot's metadata, using a transcript ID as evidence for older bots."""
+    bot_id = bot["bot_id"]
+    attrs = bot.get("custom_attributes")
+    if not isinstance(attrs, dict) or BRIEF_TRANSCRIPTION_ATTR not in attrs:
+        status = await bot_status(client, key, bot_id)
+        attrs = status.get("custom_attributes") if isinstance(status, dict) else None
+    enabled = attrs.get(BRIEF_TRANSCRIPTION_ATTR) if isinstance(attrs, dict) else None
+    if isinstance(enabled, bool):
+        return enabled
+    tid = _transcript_id(await bot_detail(client, key, bot_id))
+    return True if tid and _BOT_ID_RE.fullmatch(str(tid)) else None
+
+
+def _transcript_id(detail: Any):
+    if not isinstance(detail, dict):
+        return None
+    bot = detail.get("bot_details")
+    nested = field(bot, "transcript_id") if isinstance(bot, dict) else None
+    return nested or field(detail, "transcript_id")
+
+
 async def transcript(client, key, bot_id: str) -> tuple[Optional[str], Any]:
-    """``(transcript_id, segments)``; segments is ``None`` while the transcript is not ready."""
-    detail = await bot_detail(client, key, bot_id)
-    tid = field(detail.get("bot_details") or {}, "transcript_id") or field(detail, "transcript_id")
-    if not tid:
-        runs = (await request(client, key, "GET", bot_path(bot_id, "transcriptions"))).get("transcriptions") or []
-        done = [r for r in runs if re.search(r"success|completed", str(r.get("status", "")), re.I)]
-        tid = (done or runs or [{}])[0].get("transcript_id")
+    """Return a readable transcript, preferring the bot's primary transcript."""
+    tid = _transcript_id(await bot_detail(client, key, bot_id))
+    if tid:
+        segments = await _read_transcript(client, key, bot_id, tid)
+        if segments is not None:
+            return tid, segments
+
+    listing = await request(client, key, "GET", bot_path(bot_id, "transcriptions"))
+    runs = listing.get("transcriptions", []) if isinstance(listing, dict) else []
+    runs = [row for row in runs or [] if isinstance(row, dict) and isinstance(row.get("transcript_id"), str)
+            and _BOT_ID_RE.fullmatch(row["transcript_id"])]
+    # Media processing may finish while the original run is stuck. A completed post-call
+    # re-transcription has its own ID and may be readable even while the primary returns 202.
+    done = [row["transcript_id"] for row in runs
+            if str(row.get("status", "")).strip().casefold() in {"success", "completed"}
+            and row["transcript_id"] != tid]
+    for candidate in list(dict.fromkeys(done))[:MAX_LIST_PAGES]:
+        recovered = await _read_transcript(client, key, bot_id, candidate)
+        if recovered is not None:
+            return candidate, recovered
+    if tid or done:
+        return tid or done[0], None
+    first = runs[0]["transcript_id"] if runs else None
+    return first, await _read_transcript(client, key, bot_id, first)
+
+
+async def _read_transcript(client, key, bot_id: str, tid: str | None) -> Any:
     if tid:
         if not _BOT_ID_RE.fullmatch(str(tid)):
             raise MeetStreamError(0, "MeetStream returned a malformed transcript_id")
@@ -354,8 +412,7 @@ async def transcript(client, key, bot_id: str) -> tuple[Optional[str], Any]:
     try:
         data = await request(client, key, "GET", path, pending_as_none=True)
     except MeetStreamError as e:
-        if e.status == 404:
-            return tid, None
+        if e.status == 404 or (e.status == 409 and "session billing is still in progress" in e.detail.casefold()):
+            return None
         raise
-    segments = data.get("message") if isinstance(data, dict) and isinstance(data.get("message"), list) else data
-    return tid, segments
+    return data.get("message") if isinstance(data, dict) and isinstance(data.get("message"), list) else data

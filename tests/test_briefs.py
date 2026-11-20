@@ -59,6 +59,8 @@ async def worker(mode: str, home: Path):
             return httpx.Response(200, json={"status": "InWaitingRoom" if mode == "lobby" else "Done"})
         if path.endswith("/detail"):
             return httpx.Response(200, json={"transcript_id": "qa-transcript"})
+        if path.endswith("/transcriptions"):
+            return httpx.Response(200, json={"transcriptions": []})
         if path.endswith("/get_transcript"):
             if mode == "pending":
                 return httpx.Response(202, json={"message": "Processing"})
@@ -147,6 +149,92 @@ class FeatureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(create.call_args.args[2]["custom_attributes"][api.GIF_ATTR])
                 watch.assert_called_once_with(BOT, status_gifs=True)
 
+    async def test_poll_migrates_older_pending_ledger_before_recovery(self):
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        ledger = briefs.Briefs(home)
+        with ledger.db() as db:
+            db.execute("ALTER TABLE briefs ADD COLUMN origin TEXT")
+            db.execute("ALTER TABLE briefs ADD COLUMN send_started INTEGER NOT NULL DEFAULT 0")
+        ledger.queue(BOT, ORIGINAL, "Join requested")
+
+        with mock.patch.object(api, "bot_status", return_value={"status": "InMeeting"}):
+            await briefs.poll(home, None, KEY, Model())
+
+        self.assertEqual(ledger.status(BOT, ORIGINAL), "In the meeting")
+        self.assertTrue(ledger.wake(BOT, 1))
+
+    async def test_generation_failure_retries_across_polls_and_delivers_one_notice(self):
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with SessionDB(home / "state.db") as db:
+            db.create_session(ORIGINAL, source="desktop")
+        ledger = briefs.Briefs(home)
+        ledger.prepare()
+        ledger.queue(BOT, ORIGINAL, "In the meeting")
+        with (mock.patch.object(api, "bot_status", return_value={"status": "Done"}),
+              mock.patch.object(api, "transcript", return_value=("transcript", TRANSCRIPT)),
+              mock.patch.object(briefs, "summarize", side_effect=ValueError("invalid model output")) as summarize):
+            for _ in range(4):
+                with ledger.db() as db:
+                    db.execute("UPDATE briefs SET due = 0")
+                await briefs.poll(home, None, KEY, Model())
+        self.assertEqual(summarize.await_count, 3)
+        with SessionDB(home / "state.db", read_only=True) as db:
+            notes = db.get_messages(ORIGINAL)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Decision brief unavailable", notes[0]["content"])
+        self.assertIn("transcript is available", notes[0]["content"])
+
+    async def test_reused_bots_only_queue_when_transcription_is_verified(self):
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with SessionDB(home / "state.db") as db:
+            db.create_session(ORIGINAL, source="desktop")
+        opts = {"meeting_url": "https://meet.google.com/abc-defg-hij", "decision_brief": True}
+        result = {"bot_id": BOT, "status": "InMeeting", "reused": True}
+        with (mock.patch.object(tools, "get_hermes_home", return_value=home),
+              mock.patch.object(tools, "settings", return_value=dict(tools.DEFAULTS)),
+              mock.patch.object(tools, "api_key", return_value=KEY),
+              mock.patch.object(adapter_mod, "watch"),
+              mock.patch.object(api, "create_bot", return_value=result),
+              mock.patch.object(api, "bot_status", return_value={"custom_attributes": {}}) as status,
+              mock.patch.object(api, "bot_detail", return_value={"bot_details": {}}) as detail):
+            unverified = json.loads(await tools.handle_join(opts, session_id=ORIGINAL))
+            self.assertTrue(unverified["reused"])
+            self.assertFalse(unverified["decision_brief_queued"])
+            self.assertIn("could not verify", unverified["decision_brief"])
+            status.return_value = {"custom_attributes": {api.BRIEF_TRANSCRIPTION_ATTR: False}}
+            detail.reset_mock()
+            disabled = json.loads(await tools.handle_join(opts, session_id=ORIGINAL))
+            self.assertFalse(disabled["decision_brief_queued"])
+            self.assertIn("without a post-call transcription provider", disabled["decision_brief"])
+            detail.assert_not_awaited()
+
+            status.return_value = {"custom_attributes": {}}
+            detail.return_value = {"bot_details": {"transcript_id": "ready"}}
+            verified = json.loads(await tools.handle_join(opts, session_id=ORIGINAL))
+            self.assertTrue(verified["decision_brief_queued"])
+
+    async def test_repeat_join_reports_a_completed_brief_without_queuing_again(self):
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with SessionDB(home / "state.db") as db:
+            db.create_session(ORIGINAL, source="desktop")
+        ledger = briefs.Briefs(home)
+        ledger.prepare()
+        ledger.queue(BOT, ORIGINAL, "In the meeting")
+        ledger.finish(BOT, "Result posted to this chat")
+        with (mock.patch.object(tools, "get_hermes_home", return_value=home),
+              mock.patch.object(tools, "settings", return_value=dict(tools.DEFAULTS)),
+              mock.patch.object(api, "create_bot", return_value={
+                  "bot_id": BOT, "status": "InMeeting", "reused": True,
+                  "custom_attributes": {api.BRIEF_TRANSCRIPTION_ATTR: True},
+              }),
+              mock.patch.object(adapter_mod, "watch")):
+            result = json.loads(await tools.handle_join(
+                {"meeting_url": "https://meet.google.com/abc-defg-hij", "decision_brief": True}, session_id=ORIGINAL,
+            ))
+        self.assertFalse(result["decision_brief_queued"])
+        self.assertEqual(result["decision_brief_status"], "Result posted to this chat")
+        self.assertEqual(ledger.due(), [])
+
     async def test_only_actual_activity_sends_the_supplied_animated_gifs(self):
         sent = []
 
@@ -219,6 +307,22 @@ class FeatureTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "valid transcript reference"):
             await briefs.summarize(llm, TRANSCRIPT)
 
+
+    async def test_action_owner_and_due_need_evidence_in_the_cited_fragment(self):
+        llm = SimpleNamespace(acomplete_structured=mock.AsyncMock(return_value=SimpleNamespace(parsed={
+            "decisions": [], "questions": [],
+            "actions": [
+                {"text": "Deliver the first edit", "owner": "Priya", "due": "Thursday",
+                 "ref": 2, "quote": "deliver the first edit Thursday"},
+                {"text": "Check captions", "owner": "Taylor", "due": "Monday",
+                 "ref": 3, "quote": "check captions on Friday"},
+            ],
+        })))
+        text = await briefs.summarize(llm, TRANSCRIPT)
+        self.assertIn("Owner: Priya · Due: Thursday", text)
+        self.assertIn("Owner: unassigned · Due: not stated", text)
+        self.assertNotIn("Taylor", text)
+        self.assertNotIn("Monday", text)
 
     async def test_matching_timestamp_without_supporting_quote_is_omitted(self):
         llm = mock.Mock()

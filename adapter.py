@@ -19,6 +19,7 @@ import asyncio
 import logging
 import math
 import re
+import sqlite3
 import time
 from dataclasses import dataclass, field as dc_field
 from datetime import UTC, datetime, timedelta
@@ -205,7 +206,7 @@ class MeetStreamAdapter(BasePlatformAdapter):
                         Path(self._profile_home), self._brief_wake,
                         int(self._brief_webhook_port), _get_scoped_secret("MEETSTREAM_BRIEF_WEBHOOK_SECRET", ""),
                     )
-                except (ImportError, OSError, ValueError, RuntimeError) as exc:
+                except (ImportError, OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
                     logger.warning("[%s] Brief webhook could not start; polling remains active: %s", self.name, exc)
         logger.info("[%s] Connected; chat poll %.0fs, discovery %s", self.name, self._chat_poll,
                     f"{self._discovery:.0f}s" if self._discovery else "off")

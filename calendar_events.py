@@ -40,12 +40,15 @@ def parse_date(value: str) -> date:
 
 
 def parse_time(value) -> datetime | None:
-    if not isinstance(value, str) or "T" not in value:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        parsed = datetime.fromisoformat(value)
-        return parsed if parsed.utcoffset() is not None else None
-    except (ValueError, OverflowError):
+        if isinstance(value, str) and "T" in value:
+            parsed = datetime.fromisoformat(value)
+            return parsed if parsed.utcoffset() is not None else None
+        epoch = float(value)
+        return datetime.fromtimestamp(epoch, UTC) if epoch > 0 else None
+    except (ValueError, TypeError, OverflowError, OSError):
         return None
 
 
