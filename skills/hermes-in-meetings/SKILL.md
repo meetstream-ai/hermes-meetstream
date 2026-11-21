@@ -47,8 +47,9 @@ configured bot name (default "Hermes"), records it, and transcribes it.
      injection), the computer, the agent and the bridge must stay on for the whole call, and
      they should use the lowest access level (`readonly`). Link
      https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents.
-  3) MeetStream hosts the agent: 3a) MeetStream's inbuilt keys (OpenAI and Deepgram today) or
-     3b) the user's own provider keys. Bot price + $0.25 per hour agent infrastructure + the
+  3) MeetStream hosts the agent: 3a) MeetStream's inbuilt keys or 3b) the user's own provider
+     keys. Inbuilt keys per mode: Pipeline: OpenAI + Deepgram (Deepgram speech-to-text; OpenAI
+     LLM and voice). Realtime: OpenAI only. Any other provider: bring your own key. Bot price + $0.25 per hour agent infrastructure + the
      per-hour price of the models picked, shown in the dashboard agent editor before the bot
      runs. If the API answers "MeetStream-managed keys are not available for ... Use your own
      key.", say inbuilt keys are not on for the account yet and go on with 3b). Do not retry in
