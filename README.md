@@ -9,6 +9,13 @@ After the call, Hermes uses the transcript to write notes, action items, and fol
 You must supply only one item: a MeetStream API key.
 You set the other options in the MeetStream dashboard.
 
+MeetStream has two ways to integrate:
+
+1. **Bot API: meeting bots and recording.** A bot joins the call, records it, and gives the transcript, the participants and the chat after the call or during it.
+   This plugin uses this path.
+2. **Agents API: a voice agent in the meeting** (API name MIA). The agent listens and talks in the call.
+   Refer to [Voice answers in the call](#voice-answers-in-the-call).
+
 ## What you get
 
 | Item | Name | What it does |
@@ -177,15 +184,40 @@ If the account has no credit, `meetstream_join` tells Hermes to give you the top
 
 ## Voice answers in the call
 
-This plugin answers in the meeting chat. If you want an agent that talks in the call, use MIA, the MeetStream voice agent, which you set up in the MeetStream dashboard.
-MIA can use the keys of MeetStream (billed per hour), your own provider keys, or your own agent (for example Hermes) on your computer through the [MeetStream Agent Kit](https://github.com/meetstream-ai/agent-kit).
-With the Agent Kit, the speech of the meeting goes to an agent that has access to your computer, and your computer must stay on for the full call. Thus, use it only for calls with people that you trust.
+This plugin answers in the meeting chat. If you want an agent that talks in the call, use the MeetStream voice agent (API name MIA).
+You set it up in the MeetStream dashboard or with the API. There are three setups. Use them in this order:
+
+| Setup | What you do | Price for each meeting hour |
+|---|---|---|
+| a. MeetStream's inbuilt keys (default) | Pick the modules (speech-to-text, LLM, voice, or only the LLM) and the models. You need no provider account. Inbuilt keys cover OpenAI and Deepgram today. | Bot price + $0.25 agent infrastructure + the price of the models you pick. The agent editor in the dashboard shows the rate before the bot runs. |
+| b. Your own provider keys | Save your keys (OpenAI, Anthropic, Deepgram, ElevenLabs and others) in the dashboard, and pick a supported model. | Bot price + $0.25 agent infrastructure. Your provider bills you for model usage. |
+| c. Your own agent, for example Hermes | Hermes on your computer writes what the voice agent says, with your own model subscription. Use the MeetStream [Agent Kit](https://github.com/meetstream-ai/agent-kit) (`meetstream-agent-kit`, agent `hermes`) and an agent config with `model.provider: "local_agent"`. | Bot price + $0.25 agent infrastructure. MeetStream charges no model tokens for the replies of Hermes. |
+
+The bot price is $0.35 for each recording hour ($0.25 at volume). Refer to <https://meetstream.ai/pricing>.
+Inbuilt keys are not on for all accounts yet. If the API says "MeetStream-managed keys are not available for ... Use your own key.", use setup b.
+
+Setup c is never the default. Before you use it, know this:
+the speech and chat of the meeting go to an agent that has access to your computer and your terminal, and a participant can try to give it instructions (prompt injection).
+Your computer, Hermes and the Agent Kit bridge must stay on for the full call.
+Use the lowest access level (`readonly`, the default) and keep the activation code on.
+Save the pairing token of the bridge in **Integrations > Models > Local agent**, then click **Test connection** in the agent editor.
+The steps are in [MIA Screen Sharing and Custom Agents](https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents).
 
 ## Hermes in Meetings or the MeetStream connector
 
 Hermes also has a MeetStream connector in its MCP catalog (`hermes mcp install meetstream`).
 The connector gives all the tools of the MeetStream MCP server, but no answers in the meeting chat.
 Install one of the two, not the two together. If you install the two, Hermes gets two sets of meeting tools.
+
+## Latest docs
+
+- Two ways to integrate: <https://docs.meetstream.ai/guides/introduction/integration-paths>
+- First bot: <https://docs.meetstream.ai/guides/get-started/create-your-first-bot>
+- Voice agent pricing and keys: <https://docs.meetstream.ai/guides/mia/pricing-and-keys>
+- What is MIA: <https://docs.meetstream.ai/guides/mia/what-is-mia>
+- Your own agent (`local_agent`): <https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents>
+
+For the latest details, fetch a page with `.md` at the end of the URL, read <https://docs.meetstream.ai/llms.txt>, or connect the docs MCP server at <https://docs.meetstream.ai/_mcp/server>.
 
 ## Development
 

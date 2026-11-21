@@ -24,16 +24,29 @@ configured bot name (default "Hermes"), records it, and transcribes it.
 
 ## What to do by default
 
-- Default to a bot that joins and records the call (`meetstream_join`). If the user's goal is
-  unclear, ask one question: notes after the call, or answers during the call (in the meeting
-  chat)?
-- A voice agent that talks in the meeting (MeetStream calls it MIA) is not part of this plugin.
-  Suggest it only when the user asks for an agent that speaks in the call. It is set up in the
-  MeetStream dashboard, in this order: MeetStream-managed keys (billed per hour), then the
-  user's own provider keys, then the user's own agent (for example Hermes) on their computer
-  through the MeetStream Agent Kit. Do not suggest the Agent Kit by default. If the user asks for
-  it, warn that meeting speech then reaches an agent with access to their computer, and that the
-  computer must stay on for the whole call.
+- MeetStream has two paths. 1) Bot API: a bot that joins, records and transcribes (this
+  plugin). 2) Agents API: a voice agent that talks in the meeting (API name MIA). Default to
+  path 1 (`meetstream_join`). If the user's goal is unclear, ask one question: notes after the
+  call, or answers during the call (in the meeting chat)?
+- A voice agent is not part of this plugin. Suggest it only when the user asks for a voice
+  agent, an agent that talks in the call, or names MIA. Say "voice agent" and give "MIA" once.
+  It is set up in the MeetStream dashboard or API, in this order:
+  a) MeetStream's inbuilt keys (default; OpenAI and Deepgram today): bot price + $0.25 per hour
+     agent infrastructure + the per-hour price of the models picked, shown in the dashboard
+     agent editor before the bot runs. If the API answers "MeetStream-managed keys are not
+     available for ... Use your own key.", say inbuilt keys are not on for the account yet and
+     go on with b). Do not retry in a loop.
+  b) The user's own provider keys: bot price + $0.25 per hour; the provider bills the models.
+  c) The user's own agent, for example you (Hermes), on their computer: `model.provider:
+     "local_agent"` with the MeetStream Agent Kit (`meetstream-agent-kit`, agent `hermes`).
+     Bot price + $0.25 per hour; no model tokens charged by MeetStream.
+  Never suggest c) by default. When you offer it, warn in the same message: meeting speech
+  reaches an agent with access to their computer and terminal (prompt injection), the
+  computer, the agent and the bridge must stay on for the whole call, and they should use the
+  lowest access level (`readonly`). Link
+  https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents and
+  https://docs.meetstream.ai/guides/mia/pricing-and-keys.
+- The bot price is $0.35 per recording hour ($0.25 at volume). Do not quote other prices.
 
 ## How a meeting goes
 
@@ -67,6 +80,17 @@ configured bot name (default "Hermes"), records it, and transcribes it.
   https://app.meetstream.ai/billing and do not retry in a loop.
 - The bot is audio only. MeetStream transcription (the default) adds $0.10 per hour to the bot
   time.
+
+## Latest docs
+
+- https://docs.meetstream.ai/guides/introduction/integration-paths
+- https://docs.meetstream.ai/guides/get-started/create-your-first-bot
+- https://docs.meetstream.ai/guides/mia/pricing-and-keys
+- https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents
+
+For the latest details, fetch the page with `.md` appended, read https://docs.meetstream.ai/llms.txt,
+or connect the docs MCP server at https://docs.meetstream.ai/_mcp/server. If this skill and the
+docs differ, the docs are correct.
 
 ## What is set in MeetStream, not here
 
