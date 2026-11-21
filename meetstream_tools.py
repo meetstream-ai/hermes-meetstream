@@ -44,7 +44,10 @@ def _ok(data: dict) -> str:
 def _err(e: Exception) -> str:
     if isinstance(e, api.MeetStreamError):
         out = {"error": e.detail, "status_code": e.status}
-        if e.status in (401, 403):
+        if e.status == 403 and "low credits" in e.detail.lower():
+            out["hint"] = (f"The MeetStream account is out of credit. Give the user the top-up link {api.BILLING_URL} "
+                           "and do not retry until they say they added credit.")
+        elif e.status in (401, 403):
             out["hint"] = "The MeetStream API key was rejected. Check MEETSTREAM_API_KEY (app.meetstream.ai/api-key)."
         return _ok(out)
     return _ok({"error": str(e)})
