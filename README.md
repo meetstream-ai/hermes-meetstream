@@ -9,12 +9,14 @@ After the call, Hermes uses the transcript to write notes, action items, and fol
 You must supply only one item: a MeetStream API key.
 You set the other options in the MeetStream dashboard.
 
-MeetStream has two ways to integrate:
+MeetStream has three ways to integrate. Use them in this order:
 
-1. **Bot API: meeting bots and recording.** A bot joins the call, records it, and gives the transcript, the participants and the chat after the call or during it.
-   This plugin uses this path.
-2. **Agents API: a voice agent in the meeting** (API name MIA). The agent listens and talks in the call.
+1. **Recording only (Bot API).** A bot joins the call, records it, and gives the transcript, the participants and the chat after the call or during it.
+   This plugin uses this flow.
+2. **Agents in meetings, with your own stack.** Use this flow first when you want an agent that talks in the call.
+   2a is a bridge server that runs your own speech-to-text, LLM and voice. 2b is your own agent, for example Hermes, as the brain.
    Refer to [Voice answers in the call](#voice-answers-in-the-call).
+3. **Managed agent infrastructure (Agents API).** MeetStream hosts the voice agent (API name MIA).
 
 ## What you get
 
@@ -184,19 +186,21 @@ If the account has no credit, `meetstream_join` tells Hermes to give you the top
 
 ## Voice answers in the call
 
-This plugin answers in the meeting chat. If you want an agent that talks in the call, use the MeetStream voice agent (API name MIA).
-You set it up in the MeetStream dashboard or with the API. There are three setups. Use them in this order:
+This plugin answers in the meeting chat. If you want an agent that talks in the call, there are three flows after recording only.
+Use them in this order:
 
-| Setup | What you do | Price for each meeting hour |
+| Flow | What you do | Price for each meeting hour |
 |---|---|---|
-| a. MeetStream's inbuilt keys (default) | Pick the modules (speech-to-text, LLM, voice, or only the LLM) and the models. You need no provider account. Inbuilt keys cover OpenAI and Deepgram today. | Bot price + $0.25 agent infrastructure + the price of the models you pick. The agent editor in the dashboard shows the rate before the bot runs. |
-| b. Your own provider keys | Save your keys (OpenAI, Anthropic, Deepgram, ElevenLabs and others) in the dashboard, and pick a supported model. | Bot price + $0.25 agent infrastructure. Your provider bills you for model usage. |
-| c. Your own agent, for example Hermes | Hermes on your computer writes what the voice agent says, with your own model subscription. Use the MeetStream [Agent Kit](https://github.com/meetstream-ai/agent-kit) (`meetstream-agent-kit`, agent `hermes`) and an agent config with `model.provider: "local_agent"`. | Bot price + $0.25 agent infrastructure. MeetStream charges no model tokens for the replies of Hermes. |
+| 2a. Bridge server (your own stack) | The bot sends the live audio of the call to your server (`live_audio_required`). Your server sends audio, chat and images back on the control socket (`socket_connection_url`). You run your own speech-to-text, LLM and voice. They can be hosted or local. Refer to [Bridge server architecture](https://docs.meetstream.ai/guides/websockets/bridge-server-architecture) and the starter [MeetStream Bridge](https://github.com/meetstream-ai/meetstream-agent). | Bot price only. MeetStream charges no agent infrastructure and no model tokens. |
+| 2b. Your own agent as the brain, for example Hermes | Hermes on your computer writes what the voice agent says, with your own model subscription. Use the MeetStream [Agent Kit](https://github.com/meetstream-ai/agent-kit) (`meetstream-agent-kit`, agent `hermes`) and an agent config with `model.provider: "local_agent"`. | Bot price + $0.25 agent infrastructure. MeetStream charges no model tokens for the replies of Hermes. |
+| 3. Managed agent infrastructure (Agents API, MIA) | MeetStream hosts the agent. 3a: MeetStream's inbuilt keys. Inbuilt keys cover OpenAI and Deepgram today. 3b: your own provider keys (OpenAI, Anthropic, Deepgram, ElevenLabs and others). | Bot price + $0.25 agent infrastructure + the price of the models you pick. The agent editor in the dashboard shows the rate before the bot runs. With 3b, your provider bills you for model usage. |
 
 The bot price is $0.35 for each recording hour ($0.25 at volume). Refer to <https://meetstream.ai/pricing>.
-Inbuilt keys are not on for all accounts yet. If the API says "MeetStream-managed keys are not available for ... Use your own key.", use setup b.
+If you do not want to operate servers, use flow 3.
+Inbuilt keys are not on for all accounts yet. If the API says "MeetStream-managed keys are not available for ... Use your own key.", use flow 3b. Do not retry the same request.
+A flow 3 bot takes only `agent_config_id`. Do not add the bridge sockets to that bot.
 
-Setup c is never the default. Before you use it, know this:
+Flow 2b is never the default. Before you use it, know this:
 the speech and chat of the meeting go to an agent that has access to your computer and your terminal, and a participant can try to give it instructions (prompt injection).
 Your computer, Hermes and the Agent Kit bridge must stay on for the full call.
 Use the lowest access level (`readonly`, the default) and keep the activation code on.
@@ -211,7 +215,8 @@ Install one of the two, not the two together. If you install the two, Hermes get
 
 ## Latest docs
 
-- Two ways to integrate: <https://docs.meetstream.ai/guides/introduction/integration-paths>
+- Integration paths: <https://docs.meetstream.ai/guides/introduction/integration-paths>
+- Bridge server (flow 2a): <https://docs.meetstream.ai/guides/websockets/bridge-server-architecture>
 - First bot: <https://docs.meetstream.ai/guides/get-started/create-your-first-bot>
 - Voice agent pricing and keys: <https://docs.meetstream.ai/guides/mia/pricing-and-keys>
 - What is MIA: <https://docs.meetstream.ai/guides/mia/what-is-mia>
