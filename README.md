@@ -9,14 +9,16 @@ After the call, Hermes uses the transcript to write notes, action items, and fol
 You must supply only one item: a MeetStream API key.
 You set the other options in the MeetStream dashboard.
 
-MeetStream has three ways to integrate. Use them in this order:
+MeetStream has three build tracks. Use them in this order:
 
-1. **Recording only (Bot API).** A bot joins the call, records it, and gives the transcript, the participants and the chat after the call or during it.
-   This plugin uses this flow.
-2. **Agents in meetings, with your own stack.** Use this flow first when you want an agent that talks in the call.
-   2a is a bridge server that runs your own speech-to-text, LLM and voice. 2b is your own agent, for example Hermes, as the brain.
+1. **Recording bot.** A bot joins the call, records it, and transcribes it. 1a gives the transcript, the participants and the chat after the call. 1b gives live data during the call.
+   This plugin uses this track.
+2. **Bridge server (your own stack, local).** Use this track first when you want an agent that talks in the call.
+   Your server runs your own speech-to-text, LLM and text-to-speech.
    Refer to [Voice answers in the call](#voice-answers-in-the-call).
-3. **Managed agent infrastructure (Agents API).** MeetStream hosts the voice agent (API name MIA).
+3. **Agents API infra (hosted by MeetStream).** MeetStream hosts the voice agent (API name MIA).
+   3a uses MeetStream's own, default keys. 3c uses your own keys.
+   3b (bring your own agent infra, LiveKit) and 3d (local agent: your own agent CLI, for example Hermes, as the brain) are coming soon. They are not available yet.
 
 ## What you get
 
@@ -186,26 +188,25 @@ If the account has no credit, `meetstream_join` tells Hermes to give you the top
 
 ## Voice answers in the call
 
-This plugin answers in the meeting chat. If you want an agent that talks in the call, there are three flows after recording only.
+This plugin answers in the meeting chat. If you want an agent that talks in the call, use these tracks after the recording bot.
 Use them in this order:
 
-| Flow | What you do | Price for each meeting hour |
+| Track | What you do | Price for each meeting hour |
 |---|---|---|
-| 2a. Bridge server (your own stack) | The bot sends the live audio of the call to your server (`live_audio_required`). Your server sends audio, chat and images back on the control socket (`socket_connection_url`). You run your own speech-to-text, LLM and voice. They can be hosted or local. Refer to [Bridge server architecture](https://docs.meetstream.ai/guides/websockets/bridge-server-architecture) and the starter [MeetStream Bridge](https://github.com/meetstream-ai/meetstream-agent). | Bot price only. MeetStream charges no agent infrastructure and no model tokens. |
-| 2b. Your own agent as the brain, for example Hermes | Hermes on your computer writes what the voice agent says, with your own model subscription. Use the MeetStream [Agent Kit](https://github.com/meetstream-ai/agent-kit) (`meetstream-agent-kit`, agent `hermes`) and an agent config with `model.provider: "local_agent"`. | Bot price + $0.25 agent infrastructure. MeetStream charges no model tokens for the replies of Hermes. |
-| 3. Managed agent infrastructure (Agents API, MIA) | MeetStream hosts the agent. 3a: MeetStream's inbuilt keys. Inbuilt keys work in pipeline mode only: Deepgram (speech-to-text) and OpenAI (LLM and voice). Realtime mode runs on OpenAI and needs your own OpenAI key. Any other provider: bring your own key. 3b: your own provider keys (OpenAI, Anthropic, Deepgram, ElevenLabs and others). | Bot price + $0.25 agent infrastructure + the price of the models you pick. The agent editor in the dashboard shows the rate before the bot runs. With 3b, your provider bills you for model usage. |
+| 2. Bridge server (your own stack, local) | The bot sends the live audio of the call to your server (`live_audio_required.websocket_url`). Your server sends audio, chat and images back on the control socket (`socket_connection_url.websocket_url`). You run your own speech-to-text, LLM and text-to-speech. Free local models are possible, for example faster-whisper or Parakeet, a model in Ollama, and Piper or Kokoro. On a laptop, use a local tunnel (ngrok or cloudflared). Refer to [Bridge server architecture](https://docs.meetstream.ai/guides/websockets/bridge-server-architecture) and the starter [MeetStream Bridge](https://github.com/meetstream-ai/meetstream-agent). | Bot price only. MeetStream charges no agent infrastructure and no model tokens. |
+| 3. Agents API infra (MIA, hosted by MeetStream) | MeetStream hosts the agent. 3a: MeetStream's own, default keys. Inbuilt keys work in pipeline mode only: Deepgram (speech-to-text) and OpenAI (LLM and voice). Realtime mode runs on OpenAI and needs your own OpenAI key. 3c: your own provider keys (OpenAI, Anthropic, Deepgram, ElevenLabs and others). | Bot price + $0.25 agent infrastructure + the price of the models you pick. The agent editor in the dashboard shows the rate before the bot runs. With 3c, your provider bills you for model usage. |
+| 3b. Bring your own agent infra (LiveKit) | Coming soon. Not available yet. | |
+| 3d. Local agent: Hermes as the brain | Coming soon. Not available in production yet. Hermes on your computer will write what the voice agent says, through the MeetStream [Agent Kit](https://github.com/meetstream-ai/agent-kit) (a preview) and `model.provider: "local_agent"`. | |
 
 The bot price is $0.35 for each recording hour ($0.25 at volume). Refer to <https://meetstream.ai/pricing>.
-If you do not want to operate servers, use flow 3.
-Inbuilt keys are not on for all accounts yet. If the API says "MeetStream-managed keys are not available for ... Use your own key.", use flow 3b. Do not retry the same request.
-A flow 3 bot takes only `agent_config_id`. Do not add the bridge sockets to that bot.
+If you do not want to operate servers, use track 3a or 3c.
+Inbuilt keys are not on for all accounts yet. If the API says "MeetStream-managed keys are not available for ... Use your own key.", use track 3c. Do not retry the same request.
+A hosted agent bot (track 3) takes only `agent_config_id`. Do not add the bridge sockets to that bot.
 
-Flow 2b is never the default. Before you use it, know this:
-the speech and chat of the meeting go to an agent that has access to your computer and your terminal, and a participant can try to give it instructions (prompt injection).
-Your computer, Hermes and the Agent Kit bridge must stay on for the full call.
-Use the lowest access level (`readonly`, the default) and keep the activation code on.
-Save the pairing token of the bridge in **Integrations > Models > Local agent**, then click **Test connection** in the agent editor.
-The steps are in [MIA Screen Sharing and Custom Agents](https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents).
+Hermes can use MeetStream today for recording (this plugin) and with hosted agents (track 3).
+Hermes as the brain of the voice agent (track 3d) is coming soon. When it is available, know this:
+the speech and chat of the meeting will go to an agent that has access to your computer and your terminal, and a participant can try to give it instructions (prompt injection).
+Use the lowest access level.
 
 ## Hermes in Meetings or the MeetStream connector
 
@@ -216,11 +217,11 @@ Install one of the two, not the two together. If you install the two, Hermes get
 ## Latest docs
 
 - Integration paths: <https://docs.meetstream.ai/guides/introduction/integration-paths>
-- Bridge server (flow 2a): <https://docs.meetstream.ai/guides/websockets/bridge-server-architecture>
+- Bridge server (track 2): <https://docs.meetstream.ai/guides/websockets/bridge-server-architecture>
 - First bot: <https://docs.meetstream.ai/guides/get-started/create-your-first-bot>
 - Voice agent pricing and keys: <https://docs.meetstream.ai/guides/mia/pricing-and-keys>
 - What is MIA: <https://docs.meetstream.ai/guides/mia/what-is-mia>
-- Your own agent (`local_agent`): <https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents>
+- Local agent (`local_agent`, track 3d, coming soon): <https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents>
 
 For the latest details, fetch a page with `.md` at the end of the URL, read <https://docs.meetstream.ai/llms.txt>, or connect the docs MCP server at <https://docs.meetstream.ai/_mcp/server>.
 

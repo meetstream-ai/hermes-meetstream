@@ -24,38 +24,41 @@ configured bot name (default "Hermes"), records it, and transcribes it.
 
 ## What to do by default
 
-- MeetStream has three flows, in this order. 1) Recording only (Bot API): a bot that joins,
-  records and transcribes (this plugin). Default to it (`meetstream_join`). If the user's goal
-  is unclear, ask one question: notes after the call, or answers during the call (in the
-  meeting chat)? 2) Agents in meetings with the user's own stack. 3) Managed agent
-  infrastructure (Agents API, MIA).
+- MeetStream has three build tracks, in this order. 1) Recording bot: a bot that joins,
+  records and transcribes (this plugin). 1a is after the call; 1b is live. Default to it
+  (`meetstream_join`). If the user's goal is unclear, ask one question: notes after the call,
+  or answers during the call (in the meeting chat)? 2) Bridge server (the user's own stack,
+  local). 3) Agents API infra (MIA, hosted by MeetStream).
 - A voice agent is not part of this plugin. Suggest one only when the user asks for a voice
   agent, an agent that talks in the call, or names MIA. Say "voice agent" and give "MIA" once.
-  If the user wants an agent but does not say how, ask one question: run your own stack, or
-  let MeetStream host it? If they want no infrastructure work, flow 3 is the answer.
-  2a) Bridge server: the bot opens two WebSockets to the user's server, live audio in
+  If the user wants an agent but does not say how, ask one question: run your own stack
+  (track 2), or let MeetStream host it (track 3a or 3c)? If they want no infrastructure work,
+  track 3a is the answer.
+  2) Bridge server: the bot opens two WebSockets to the user's server, live audio in
      (`live_audio_required.websocket_url`) and the control socket
      (`socket_connection_url.websocket_url`) to send audio, chat and images back. The user runs
-     their own speech-to-text, LLM and voice, hosted or local. Bot price only. Link
+     their own speech-to-text, LLM and text-to-speech; free local models work (for example
+     faster-whisper or Parakeet, a model in Ollama, Piper or Kokoro; free to run locally, check
+     each model's license before commercial use). On a laptop, expose the server with a local
+     tunnel (ngrok, cloudflared). Bot price only. Link
      https://docs.meetstream.ai/guides/websockets/bridge-server-architecture and the starter
      https://github.com/meetstream-ai/meetstream-agent.
-  2b) The user's own agent as the brain, for example you (Hermes), on their computer:
-     `model.provider: "local_agent"` with the MeetStream Agent Kit (`meetstream-agent-kit`,
-     agent `hermes`). Bot price + $0.25 per hour agent infrastructure; no model tokens charged
-     by MeetStream. Never suggest 2b by default. When you offer it, warn in the same message:
-     meeting speech reaches an agent with access to their computer and terminal (prompt
-     injection), the computer, the agent and the bridge must stay on for the whole call, and
-     they should use the lowest access level (`readonly`). Link
-     https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents.
-  3) MeetStream hosts the agent: 3a) MeetStream's inbuilt keys or 3b) the user's own provider
-     keys. Inbuilt keys work in pipeline mode only: Deepgram (speech-to-text) and OpenAI (LLM
-     and voice). Realtime mode runs on OpenAI and needs your own OpenAI key. Any other
-     provider: bring your own key. Bot price + $0.25 per hour agent infrastructure + the
+  3) MeetStream hosts the agent: 3a) MeetStream's own, default keys or 3c) the user's own
+     provider keys. Inbuilt keys work in pipeline mode only: Deepgram (speech-to-text) and
+     OpenAI (LLM and voice). Realtime mode runs on OpenAI and needs your own OpenAI key. Any
+     other provider: bring your own key. Bot price + $0.25 per hour agent infrastructure + the
      per-hour price of the models picked, shown in the dashboard agent editor before the bot
      runs. If the API answers "MeetStream-managed keys are not available for ... Use your own
-     key.", say inbuilt keys are not on for the account yet and go on with 3b). Do not retry in
-     a loop. A flow 3 bot takes only `agent_config_id`; never add the bridge sockets to it.
-     Link https://docs.meetstream.ai/guides/mia/pricing-and-keys.
+     key.", say inbuilt keys are not on for the account yet and go on with 3c). Do not retry in
+     a loop. A hosted agent bot takes only `agent_config_id`; never add the bridge sockets to
+     it. Link https://docs.meetstream.ai/guides/mia/pricing-and-keys.
+  3b) Bring your own agent infra (LiveKit) and 3d) the local agent (the user's own agent CLI,
+     for example you, Hermes, as the brain through the MeetStream Agent Kit and
+     `model.provider: "local_agent"`) are COMING SOON. They are not in production. Never offer
+     them as working options and give no setup steps. If the user asks for Hermes as the brain
+     of the voice agent, say it is coming soon, that meeting speech will then reach an agent
+     with access to their computer and terminal (prompt injection), and offer track 2 or 3a/3c
+     for today. Hermes can still use MeetStream for recording (this plugin) and hosted agents.
 - The bot price is $0.35 per recording hour ($0.25 at volume). Do not quote other prices.
 
 ## How a meeting goes
