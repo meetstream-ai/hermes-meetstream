@@ -49,7 +49,7 @@ MeetStream has three ways to integrate. Use them in this order:
    Hermes keeps the key in the `.env` file of your profile.
 3. Start a new Hermes session.
 
-Before the plugin is in the Hermes catalog, use the repository address:
+The Hermes plugin catalog can pin an earlier version of this plugin than the one on `main` (the catalog entry names the version). To install the latest `main`, use the repository address:
 
 ```bash
 hermes plugins install meetstream-ai/hermes-meetstream --enable
