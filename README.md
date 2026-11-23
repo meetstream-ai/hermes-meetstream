@@ -321,7 +321,7 @@ To sign in, run `meetstream login`. The command opens your browser and keeps a k
 - Track 3a: run `meetstream setup --mode hosted`, then `meetstream join <url> --agent-config <id>`.
 - Track 3c: run `meetstream setup --mode byok`. Add your provider keys in the dashboard. The setup does not ask for keys.
 
-When Hermes runs the CLI, Hermes uses `meetstream <command> --json --no-input` and reads the JSON output.
+When Hermes runs the CLI, Hermes uses `meetstream <command> --json --no-input` and reads the JSON output. `meetstream skill` prints the CLI's full guide for agents (every command and its JSON output).
 
 Hermes can use MeetStream today for recording (this plugin) and with hosted agents (track 3).
 Hermes as the brain of the voice agent (track 3d) is coming soon. When it is available, know this:
