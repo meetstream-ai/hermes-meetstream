@@ -1,7 +1,7 @@
 ---
 name: hermes-in-meetings
 description: Join the user's Zoom, Google Meet or Microsoft Teams calls through a MeetStream bot, answer questions asked in the meeting chat, and do the follow-up work from the transcript. Use when the user asks you to join, sit in on, record, take notes on or summarize a meeting, or to post something in a call.
-version: 0.2.1
+version: 0.2.2
 metadata:
   hermes:
     tags: [meetings, zoom, google-meet, microsoft-teams, transcription, notes]
@@ -51,10 +51,13 @@ configured bot name (default "Hermes"), records it, and transcribes it.
      runs. If the API answers "MeetStream-managed keys are not available for ... Use your own
      key.", say inbuilt keys are not on for the account yet and go on with 3c). Do not retry in
      a loop. A hosted agent bot takes only `agent_config_id`; never add the bridge sockets to
-     it. Link https://docs.meetstream.ai/guides/mia/pricing-and-keys.
+     it. Link https://docs.meetstream.ai/guides/mia/pricing-and-keys. With the `meetstream` CLI
+     (if the user has it): `meetstream setup --mode hosted --json --no-input` (3a) or
+     `--mode byok` (3c; keys go in the dashboard, setup never asks for them), then
+     `meetstream join <url> --agent-config <id> --json --no-input`.
   3b) Bring your own agent infra (LiveKit) and 3d) the local agent (the user's own agent CLI,
-     for example you, Hermes, as the brain through the MeetStream Agent Kit and
-     `model.provider: "local_agent"`) are COMING SOON. They are not in production. Never offer
+     for example you, Hermes, as the brain through `meetstream setup` and `meetstream agent serve`
+     over the MeetStream relay) are COMING SOON. They are not in production. Never offer
      them as working options and give no setup steps. If the user asks for Hermes as the brain
      of the voice agent, say it is coming soon, that meeting speech will then reach an agent
      with access to their computer and terminal (prompt injection), and offer track 2 or 3a/3c
