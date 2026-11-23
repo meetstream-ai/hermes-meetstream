@@ -6,6 +6,7 @@ import json
 import sys
 import time
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -49,8 +50,14 @@ class FakeMeetStream:
         self.bots: dict[str, dict] = {}
         self.sent: list[tuple[str, str]] = []
         self.created: list[dict] = []
+        self.join_keys: dict[str, str] = {}
+        self.hide_list = False
+        self.transcript_responses: list[httpx.Response] = []
         self.requests: list[httpx.Request] = []
         self.reject_key = False
+        self.create_error: httpx.Response | None = None
+        self.list_error = 0
+        self.chat_send_error_after: int | None = None
         self.page_size = 50
         self.broken: dict[str, int] = {}  # bot_id -> HTTP status its per-bot endpoints return
         self.bot_display = "Hermes"  # how the meeting shows the bot's own chat messages
@@ -77,14 +84,32 @@ class FakeMeetStream:
         if path == "/bots/create_bot" and self.create_error is not None:
             return self.create_error
         if path == "/bots/create_bot":
+            if self.create_error is not None:
+                return self.create_error
             body = json.loads(request.content)
+            retry_key = request.headers.get("Idempotency-Key")
+            if retry_key in self.join_keys:
+                bot_id = self.join_keys[retry_key]
+                return httpx.Response(507, json={"bot_id": bot_id, "status": self.bots[bot_id]["status"]})
             self.created.append(body)
-            self.add_bot("bot-new", status="Joining")
-            return httpx.Response(201, json={"bot_id": "bot-new", "status": "Active",
+            bot_id = "bot-new" if len(self.created) == 1 else f"bot-new-{len(self.created)}"
+            self.add_bot(bot_id, status="Joining", attrs=body["custom_attributes"], age_s=0)
+            if retry_key:
+                self.join_keys[retry_key] = bot_id
+            return httpx.Response(201, json={"bot_id": bot_id, "status": "Active",
                                              "meeting_url": body["meeting_link"], "transcript_id": None})
+        if path == "/transcript/t1/get_transcript" and self.transcript_responses:
+            return self.transcript_responses.pop(0)
         if path == "/bots":
+            if self.list_error:
+                return httpx.Response(self.list_error, json={"message": "Bot list temporarily unavailable"})
             rows = [{"bot_id": b, "status": v["status"], "bot_username": v["name"], "custom_attributes": v["attrs"],
                      "created_at": v["created_at"]} for b, v in self.bots.items()]
+            if self.hide_list:
+                rows = []
+            target = request.url.params.get(f"custom_attr[{api.JOIN_ATTR}]")
+            if target:
+                rows = [row for row in rows if row["custom_attributes"].get(api.JOIN_ATTR) == target]
             start = int(request.url.params.get("cursor") or 0)
             page = rows[start:start + self.page_size]
             more = start + self.page_size < len(rows)
@@ -98,9 +123,21 @@ class FakeMeetStream:
         action = parts[2]
         if action == "status":
             return httpx.Response(200, json={"bot_id": parts[1], "status": bot["status"]})
+        if action == "detail":
+            return httpx.Response(200, json={"bot_details": bot.get("detail", {})})
         if action == "get_chats":
+            if "chat_error" in bot:
+                return httpx.Response(bot["chat_error"], json={"message": "Chat unavailable"})
+            if bot.get("chat_pending"):
+                return httpx.Response(202, json="Manifest is still being processed. Current status: None")
             return httpx.Response(200, json={"chatMessages": bot["chats"]})
+        if action == "transcriptions":
+            return httpx.Response(200, json={"transcriptions": []})
+        if action == "get_transcript" and self.transcript_responses:
+            return self.transcript_responses.pop(0)
         if action == "send_message":
+            if self.chat_send_error_after is not None and len(self.sent) >= self.chat_send_error_after:
+                return httpx.Response(429, json={"message": "Rate limited"})
             text = json.loads(request.content)["message"]
             self.sent.append((parts[1], text))
             bot["chats"].append({"messageId": f"m{len(bot['chats'])}", "speakerDisplayName": self.bot_display,
@@ -160,7 +197,7 @@ class TestAddressing(unittest.TestCase):
 class TestPayload(unittest.TestCase):
     def test_join_payload_tags_bot_and_sets_safe_leave_timeouts(self):
         p = api.build_join_payload("https://meet.google.com/abc-defg-hij", bot_name="Hermes", message="hi")
-        self.assertEqual(p["custom_attributes"], {"hermes": True})
+        self.assertEqual(p["custom_attributes"], {"hermes": True, api.BRIEF_TRANSCRIPTION_ATTR: True})
         self.assertEqual(p["automatic_leave"]["everyone_left_timeout"], 60)
         self.assertEqual(p["recording_config"]["transcript"]["provider"], {"meetstream": {"language": "auto", "translate": False}})
         self.assertFalse(p["video_required"])
@@ -194,14 +231,191 @@ class TestPayload(unittest.TestCase):
 
 
 class TestTools(PluginTestCase):
+    def test_create_error_preserves_provider_message_and_retry_delay(self):
+        self.fake.create_error = httpx.Response(
+            429, headers={"Retry-After": "37"},
+            json={"error": "rate_limit_exceeded", "message": "Too many bots created"},
+        )
+        out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
+        self.assertEqual(out["status_code"], 429)
+        self.assertEqual(out["error"], "Too many bots created (retry after 37 s)")
+
+    def test_low_credit_join_error_links_to_billing(self):
+        self.fake.create_error = httpx.Response(403, json={"message": "Low credits please recharge"})
+        out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
+        self.assertEqual(out["status_code"], 403)
+        self.assertIn(api.BILLING_URL, out["hint"])
+
     def test_join_creates_tagged_bot_and_hands_it_to_the_adapter(self):
         out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
         self.assertEqual(out["bot_id"], "bot-new")
         body = self.fake.created[0]
         self.assertEqual(body["bot_name"], "Hermes")
-        self.assertEqual(body["bot_message"], "Hi, I'm Hermes.")
-        self.assertEqual(body["custom_attributes"], {"hermes": True})
-        self.assertIn("bot-new", adapter_mod._PENDING)
+        self.assertIn("recording and transcribing", body["bot_message"])
+        self.assertTrue(body["bot_message"].endswith("Hi, I'm Hermes."))
+        self.assertIs(body["custom_attributes"]["hermes"], True)
+        self.assertFalse(out["joined"])
+        self.assertIn((str(adapter_mod.get_hermes_home()), "bot-new"), adapter_mod._PENDING)
+
+    def test_duplicate_join_reuses_bot_and_finished_call_can_rejoin_same_link(self):
+        url = "https://meet.google.com/abc-defg-hij"
+        first = json.loads(self.run_async(tools.handle_join({"meeting_url": url})))
+        self.fake.bots[first["bot_id"]]["status"] = "InWaitingRoom"
+        again = json.loads(self.run_async(tools.handle_join({"meeting_url": url + "?authuser=0"})))
+        self.assertTrue(again["reused"])
+        self.assertEqual(again["bot_id"], first["bot_id"])
+        self.assertEqual(again["status"], "InWaitingRoom")
+        self.assertEqual(len(self.fake.created), 1)
+
+        self.fake.bots[first["bot_id"]]["status"] = "MediaProcessing"
+        later = json.loads(self.run_async(tools.handle_join({"meeting_url": url})))
+        self.assertFalse(later["reused"])
+        self.assertNotEqual(later["bot_id"], first["bot_id"])
+        self.assertEqual(len(self.fake.created), 2)
+
+    def test_scheduled_occurrences_are_distinct_but_equivalent_times_reuse_the_bot(self):
+        url = "https://meet.google.com/abc-defg-hij"
+        times = ("2026-11-20T15:00:00Z", "2026-11-20T20:30:00+05:30", "2026-11-27T15:00:00Z")
+        outs = [json.loads(self.run_async(tools.handle_join({"meeting_url": url, "join_at": when})))
+                for when in times]
+        self.assertEqual(outs[0]["bot_id"], outs[1]["bot_id"])
+        self.assertNotEqual(outs[0]["bot_id"], outs[2]["bot_id"])
+        self.assertEqual(len(self.fake.created), 2)
+
+    def test_replayed_create_reuses_bot_when_it_is_not_visible_in_list(self):
+        self.fake.hide_list = True
+        args = {"meeting_url": "https://meet.google.com/abc-defg-hij"}
+        outs = [json.loads(self.run_async(tools.handle_join(args))) for _ in range(2)]
+        self.assertEqual([out["bot_id"] for out in outs], ["bot-new", "bot-new"])
+        self.assertTrue(outs[1]["reused"])
+        self.assertEqual(len(self.fake.created), 1)
+
+    def test_stale_list_and_finished_replay_still_allow_a_new_occurrence(self):
+        self.fake.hide_list = True
+        args = {"meeting_url": "https://meet.google.com/abc-defg-hij"}
+        first = json.loads(self.run_async(tools.handle_join(args)))
+        self.fake.bots[first["bot_id"]]["status"] = "Done"
+        second = json.loads(self.run_async(tools.handle_join(args)))
+        again = json.loads(self.run_async(tools.handle_join(args)))
+        self.assertNotEqual(first["bot_id"], second["bot_id"])
+        self.assertEqual(second["bot_id"], again["bot_id"])
+        self.assertEqual(len(self.fake.created), 2)
+
+    def test_disabled_transcription_and_custom_notice_are_reported_accurately(self):
+        with mock.patch.object(tools, "settings", return_value={**SETTINGS, "transcription": "none"}):
+            result = json.loads(self.run_async(tools.handle_join({
+                "meeting_url": "https://meet.google.com/abc-defg-hij",
+                "message": "Welcome from {name}.",
+            })))
+        body = self.fake.created[0]
+        self.assertFalse(result["transcription_requested"])
+        self.assertIn("recording this call", body["bot_message"])
+        self.assertNotIn("transcribing", body["bot_message"])
+        self.assertIn("Welcome from Hermes.", body["bot_message"])
+        self.assertNotIn("recording_config", body)
+
+    def test_status_includes_join_failure_reason(self):
+        self.fake.add_bot("b1", status="NotAllowed")
+        self.fake.bots["b1"]["detail"] = {"ErrorReason": "WaitingRoomTimeout", "message": "Bot was not admitted"}
+        out = json.loads(self.run_async(tools.handle_status({"bot_id": "b1"})))
+        self.assertEqual(out["status"], "NotAllowed")
+        self.assertEqual(out["error_reason"], "WaitingRoomTimeout")
+        self.assertIn("host admit", out["hint"])
+
+    def test_transcript_after_host_removal_waits_for_ready_even_if_chat_fails(self):
+        self.fake.add_bot("b1", status="Kicked")
+        self.fake.bots["b1"].update(detail={"transcript_id": "t1"}, chat_error=404)
+        segments = [{"speaker": "Priya", "transcript": "I'll finish the edit Thursday."}]
+        self.fake.transcript_responses = [
+            httpx.Response(202, json={"message": "Still processing"}),
+            httpx.Response(200, json=segments),
+        ]
+        with mock.patch.object(tools, "TRANSCRIPT_POLL_SECONDS", 0):
+            out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1", "wait_seconds": 1})))
+        self.assertEqual(out["transcript_state"], "ready")
+        self.assertEqual(out["untrusted_meeting_content"]["transcript"], segments)
+        self.assertEqual(out["chat_status_code"], 404)
+
+    def test_http_202_returns_pending_without_transcript_content(self):
+        self.fake.add_bot("b1", status="MediaProcessing")
+        self.fake.bots["b1"]["detail"] = {"transcript_id": "t1"}
+        self.fake.transcript_responses = [httpx.Response(202, json={"message": "Still processing"})]
+        out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
+        self.assertEqual(out["transcript_state"], "pending")
+        self.assertIsNone(out["untrusted_meeting_content"]["transcript"])
+
+    def test_malformed_bot_list_stops_join_without_creating_a_duplicate(self):
+        def respond(request):
+            if request.method == "GET":
+                return httpx.Response(200, json={"bots": {"unexpected": "object"}})
+            raise AssertionError("Must confirm bot list before creating a bot")
+
+        with mock.patch.object(api, "new_client", side_effect=lambda: httpx.AsyncClient(
+            base_url=api.BASE_URL, transport=httpx.MockTransport(respond)
+        )):
+            result = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
+        self.assertIn("unexpected bot list", result["error"])
+
+    def test_billing_conflict_is_pending_rather_than_permanently_unavailable(self):
+        self.fake.add_bot("b1", status="Done")
+        self.fake.bots["b1"]["detail"] = {"transcript_id": "t1"}
+        self.fake.transcript_responses = [httpx.Response(
+            409, json={"error": "Session billing is still in progress. Retry after the meeting is billed."}
+        )]
+        out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
+        self.assertEqual(out["transcript_state"], "pending")
+
+    def test_pending_primary_uses_completed_retranscription(self):
+        segments = [{"speaker": "Priya", "transcript": "We approved the plan.", "start_time": 12}]
+
+        def respond(request):
+            path = request.url.path.removeprefix("/api/v1")
+            if path == "/bots/b1/detail":
+                return httpx.Response(200, json={"bot_details": {"transcript_id": "primary"}})
+            if path == "/transcript/primary/get_transcript":
+                return httpx.Response(202)
+            if path == "/bots/b1/transcriptions":
+                return httpx.Response(200, json={"transcriptions": [
+                    {"provider": "meetstream", "transcript_id": "primary", "status": "Not started"},
+                    {"provider": "meeting_captions", "transcript_id": None, "status": "Success"},
+                    {"provider": "deepgram", "transcript_id": "stale", "status": "Success"},
+                    {"provider": "deepgram", "transcript_id": "recovered", "status": "Success"},
+                ]})
+            if path == "/transcript/stale/get_transcript":
+                return httpx.Response(404)
+            if path == "/transcript/recovered/get_transcript":
+                return httpx.Response(200, json=segments)
+            raise AssertionError(path)
+
+        async def read():
+            async with httpx.AsyncClient(base_url=api.BASE_URL, transport=httpx.MockTransport(respond)) as client:
+                return await api.transcript(client, KEY, "b1")
+
+        self.assertEqual(self.run_async(read()), ("recovered", segments))
+
+    def test_empty_transcript_and_pending_chat_are_distinct(self):
+        self.fake.add_bot("b1", status="Done")
+        self.fake.bots["b1"].update(detail={"transcript_id": "t1"}, chat_pending=True)
+        self.fake.transcript_responses = [httpx.Response(200, json=[])]
+        out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
+        self.assertEqual(out["transcript_state"], "ready")
+        self.assertTrue(out["transcript_empty"])
+        self.assertEqual(out["chat_state"], "pending")
+
+    def test_transcript_by_bot_id_reports_disabled_transcription(self):
+        self.fake.add_bot("b1", status="Done")
+        self.fake.transcript_responses = [httpx.Response(409, json={"message": "Transcription was not enabled"})]
+        out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
+        self.assertEqual(out["transcript_state"], "unavailable")
+        self.assertIn("not enabled", out["hint"])
+
+    def test_chat_error_reports_how_much_was_sent(self):
+        self.fake.add_bot("b1")
+        self.fake.chat_send_error_after = 1
+        out = json.loads(self.run_async(tools.handle_chat({"bot_id": "b1", "message": "x " * 1500})))
+        self.assertEqual(out["sent"], 1)
+        self.assertEqual(out["parts"], 2)
+        self.assertEqual(out["status_code"], 429)
 
     def test_join_refuses_bad_link_without_calling_meetstream(self):
         out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://example.com/meeting"})))
@@ -230,8 +444,9 @@ class TestTools(PluginTestCase):
         self.assertEqual(out["error"], "Too many bots created in the last minute (retry after 37 s)")
 
     def test_status_lists_only_hermes_bots(self):
-        self.fake.add_bot("b1", hermes=True)
+        self.fake.page_size = 1
         self.fake.add_bot("b2", hermes=False)
+        self.fake.add_bot("b1", hermes=True)
         out = json.loads(self.run_async(tools.handle_status({})))
         self.assertEqual([b["bot_id"] for b in out["bots"]], ["b1"])
 
@@ -337,13 +552,84 @@ class TestAdapter(PluginTestCase):
     def test_fresh_bot_found_by_discovery_answers_early_questions(self):
         async def go():
             a = self.make_adapter()
-            self.fake.add_bot("cli-bot", age_s=30)  # started from a CLI session a moment ago
+            a._started_at -= 60
+            self.fake.add_bot("cli-bot", age_s=30)
+            bot = self.fake.bots["cli-bot"]
+            bot["created_at"] = datetime.fromtimestamp(bot["created_at"], UTC).isoformat().replace("+00:00", "Z")
             self.fake.say("cli-bot", "Sid", "Hermes, first question")
             await a._tick()
             await a._client.aclose()
             return a
         a = self.run_async(go())
         a.handle_message.assert_awaited_once()
+
+    def test_recent_bot_chat_is_not_replayed_on_restart(self):
+        async def go():
+            self.fake.add_bot("b1", age_s=10)
+            self.fake.say("b1", "Sid", "Hermes, previous question")
+            a = self.make_adapter()
+            await a._tick()
+            a.handle_message.assert_not_awaited()
+            self.fake.say("b1", "Sid", "Hermes, new question")
+            await a._tick()
+            a.handle_message.assert_awaited_once()
+            await a._client.aclose()
+        self.run_async(go())
+
+    def test_zoom_chat_polling_continues_during_discovery_failure(self):
+        async def go():
+            a = self.make_adapter()
+            self.fake.list_error = 503
+            adapter_mod.watch("zoom")
+            self.fake.add_bot("zoom", status="RecordingPermissionAllowed")
+            self.fake.say("zoom", "Hermes Johnson", "Hermes, are you there?")
+            await a._tick()
+            a.handle_message.assert_awaited_once()
+            await a._client.aclose()
+        self.run_async(go())
+
+    def test_http_202_does_not_seed_history_and_slows_polling(self):
+        async def go():
+            a = self.make_adapter(discovery_seconds=0)
+            self.fake.add_bot("b1")
+            self.fake.say("b1", "Sid", "Hermes, are you there?")
+            self.fake.bots["b1"]["chat_pending"] = True
+            a._consider({"bot_id": "b1", "status": "InMeeting", "bot_username": "Hermes"})
+            await a._tick()
+            self.assertTrue(a._bots["b1"].chat_pending)
+            self.assertFalse(a._bots["b1"].seeded)
+            attempts = len(self.fake.requests)
+            await a._tick()
+            self.assertEqual(len(self.fake.requests), attempts)
+            a.handle_message.assert_not_awaited()
+            await a._client.aclose()
+        self.run_async(go())
+
+    def test_join_handoff_is_consumed_only_by_its_profile(self):
+        async def go():
+            self.fake.add_bot("b1")
+            with mock.patch.object(adapter_mod, "get_hermes_home", return_value="/profile-A"):
+                owner = self.make_adapter(discovery_seconds=0)
+                adapter_mod.watch("b1")
+            with mock.patch.object(adapter_mod, "get_hermes_home", return_value="/profile-B"):
+                other = self.make_adapter(discovery_seconds=0)
+                await other._tick()
+            self.assertNotIn("b1", other._bots)
+            await owner._tick()
+            self.assertIn("b1", owner._bots)
+            await owner._client.aclose()
+            await other._client.aclose()
+        self.run_async(go())
+
+    def test_expired_key_is_fatal_when_discovery_is_disabled(self):
+        async def go():
+            a = self.make_adapter(discovery_seconds=0)
+            self.fake.reject_key = True
+            adapter_mod.watch("b1")
+            await a._run()
+            self.assertTrue(a.has_fatal_error)
+            await a._client.aclose()
+        self.run_async(go())
 
     def test_reply_is_not_read_back_when_meeting_renames_the_bot(self):
         async def go():
@@ -479,6 +765,11 @@ class TestMeetingGuard(unittest.TestCase):
         guard.on_pre_llm_call(session_id="s-tg", platform="telegram")
         for sid in ("s-cli", "s-tg", "", "unknown"):
             self.assertIsNone(guard.on_pre_tool_call(tool_name="terminal", session_id=sid))
+
+    def test_meeting_requests_are_directed_to_the_registered_runtime_skill(self):
+        context = guard.on_pre_llm_call(session_id="private-chat", platform="telegram")
+        self.assertIn('skill_view("meetstream:hermes-in-meetings")', context["context"])
+        self.assertIsNone(guard.on_pre_llm_call(session_id="in-call", platform="meetstream"))
 
     def test_tracking_is_bounded(self):
         for i in range(guard._MAX_TRACKED + 50):

@@ -1,10 +1,11 @@
 """MeetStream gateway platform: the meeting chat of each call Hermes is in becomes a conversation.
 
-Outbound only. The adapter polls the MeetStream API; Hermes opens no port and needs no webhook.
+The adapter polls the MeetStream API. An optional loopback webhook wakes queued briefs.
 - Discovery: bots this Hermes started (``meetstream_join`` hands them over at once) plus, every
   ``discovery_seconds``, the account's bots of the last day that are tagged ``hermes: true`` or carry
   the Hermes bot name, so a bot that MeetStream calendar auto-join sends under that name also gets Hermes.
-- Chat: while a bot is in the call, its chat is read every ``chat_poll_seconds``. A message is
+- Chat: while a bot is in the call, try to read its chat. The REST artifact can stay pending until
+  after the call, in which case the adapter cannot answer live. When available, a message is
   handed to the agent only when it starts with the bot name ("Hermes, ...") or @-mentions it.
 - Identity: ``user_id`` is the sender's display name, lower-cased. Participants choose their display
   names and MeetStream exposes no stable participant id, so ``MEETSTREAM_ALLOWED_USERS`` is a
@@ -16,10 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
+import sqlite3
 import time
 from dataclasses import dataclass, field as dc_field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from threading import Lock
 from typing import Any, Optional
 
 from gateway.config import Platform, PlatformConfig
@@ -27,8 +32,9 @@ from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator
+from hermes_constants import get_hermes_home, profile_name_for_home
 
-from . import guard
+from . import briefs, guard, messaging
 from . import meetstream_client as api
 
 logger = logging.getLogger(__name__)
@@ -40,8 +46,6 @@ DISCOVERY_S = 120.0
 STATUS_REFRESH_S = 30.0
 MIN_POLL_S = 3.0  # floor so a typo in config cannot hammer the API
 FRESH_BOT_S = 300.0  # a bot created this recently has no chat history worth skipping
-MAX_LIST_PAGES = 4  # 50 bots a page: discovery reads at most the newest 200 bots of the last day
-MAX_BOT_FAILURES = 5  # consecutive errors before a bot is dropped
 BACKOFF_S = [5, 10, 30, 60]
 
 PLATFORM_HINT = (
@@ -54,13 +58,21 @@ PLATFORM_HINT = (
     "call asked, and tell them to ask the user directly for anything else."
 )
 
-# bot_id -> True for bots handed over by meetstream_join in this process. Drained by the adapter.
-_PENDING: dict[str, bool] = {}
+# Same-process join handoffs only. Each profile drains its own entries.
+_PENDING: dict[tuple[str, str], tuple[float, bool]] = {}
+_PENDING_LOCK = Lock()
 
 
-def watch(bot_id: str) -> None:
-    """Called by ``meetstream_join``: start watching this bot's chat on the next poll."""
-    _PENDING[str(bot_id)] = True
+def watch(bot_id: str, *, status_gifs: bool = False) -> None:
+    """Hand off to the gateway for this profile if it shares the tool's process."""
+    now = time.monotonic()
+    with _PENDING_LOCK:
+        for entry, (added_at, _) in list(_PENDING.items()):
+            if now - added_at >= FRESH_BOT_S:
+                del _PENDING[entry]
+        entry = str(get_hermes_home()), str(bot_id)
+        previous = _PENDING.get(entry)
+        _PENDING[entry] = now, status_gifs or (previous is not None and previous[1])
 
 
 def _key() -> str:
@@ -103,17 +115,14 @@ def addressed(text: str, name: str) -> Optional[str]:
     return None
 
 
-def _created_epoch(record: dict) -> float:
-    value = api.field(record, "created_at", "CreatedAt")
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _float_setting(extra: dict, key: str, default: float) -> float:
     try:
-        return float(extra[key]) if extra.get(key) is not None else default
+        if extra.get(key) is None:
+            return default
+        value = float(extra[key])
+        if math.isfinite(value):
+            return value
+        raise ValueError
     except (TypeError, ValueError):
         logger.warning("[meetstream] platforms.meetstream.extra.%s=%r is not a number; using %s",
                        key, extra.get(key), default)
@@ -127,13 +136,22 @@ class _Watch:
     seeded: bool = False  # existing chat already marked seen (or there is none worth skipping)
     checked_at: float = 0.0
     failures: int = 0
+    retry_at: float = 0.0
+    chat_pending: bool = False
+    chat_retry_at: float = 0.0
+    status_gifs: bool = False
+    gif_state: str = ""
+    gif_at: float = float("-inf")
+    typing_since: Optional[float] = None
+    gif_retry_at: float = 0.0
+    gif_lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
     seen: set[str] = dc_field(default_factory=set)
 
 
 class MeetStreamAdapter(BasePlatformAdapter):
     MAX_MESSAGE_LENGTH = api.MAX_CHAT
 
-    def __init__(self, config: PlatformConfig):
+    def __init__(self, config: PlatformConfig, *, llm=None):
         super().__init__(config=config, platform=Platform(PLATFORM))
         extra = config.extra or {}
         self._chat_poll = max(MIN_POLL_S, _float_setting(extra, "chat_poll_seconds", CHAT_POLL_S))
@@ -141,9 +159,18 @@ class MeetStreamAdapter(BasePlatformAdapter):
         self._discovery = 0.0 if discovery <= 0 else max(30.0, discovery)
         self._client = None
         self._task: Optional[asyncio.Task] = None
+        self._brief_task: Optional[asyncio.Task] = None
+        self._brief_wake = asyncio.Event()
+        self._brief_webhook = None
+        self._brief_webhook_port = extra.get("brief_webhook_port")
+        self._llm = llm
         self._bots: dict[str, _Watch] = {}
         self._sent: dict[str, list[str]] = {}
         self._bot_name = "Hermes"
+        self._gif_base_url = ""
+        self._profile_home = str(get_hermes_home())
+        self._started_at = time.time()
+        self._discovery_retry_at = float("-inf")
         self._discovered_at = float("-inf")  # discover on the first tick (monotonic() can be < 120 s after boot)
         self._dedup = MessageDeduplicator(max_size=5000, ttl_seconds=6 * 3600)
 
@@ -159,10 +186,28 @@ class MeetStreamAdapter(BasePlatformAdapter):
         if not _key():
             logger.warning("[%s] %s is not set", self.name, KEY_ENV)
             return False
+        if self._task and not self._task.done():
+            return True
+        if self._client:
+            await self._client.aclose()
         self._client = api.new_client()
+        self._started_at = time.time()
+        self._discovered_at = self._discovery_retry_at = float("-inf")
         self._task = asyncio.create_task(self._run())
         self._mark_connected()
         self._wire_plugin_handlers(None)
+        if self._llm is not None:
+            self._brief_task = asyncio.create_task(self._run_briefs())
+            if self._brief_webhook_port:
+                try:
+                    from .brief_webhook import start_listener
+
+                    self._brief_webhook = await start_listener(
+                        Path(self._profile_home), self._brief_wake,
+                        int(self._brief_webhook_port), _get_scoped_secret("MEETSTREAM_BRIEF_WEBHOOK_SECRET", ""),
+                    )
+                except (ImportError, OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+                    logger.warning("[%s] Brief webhook could not start; polling remains active: %s", self.name, exc)
         logger.info("[%s] Connected; chat poll %.0fs, discovery %s", self.name, self._chat_poll,
                     f"{self._discovery:.0f}s" if self._discovery else "off")
         return True
@@ -170,13 +215,15 @@ class MeetStreamAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         self._running = False
         self._mark_disconnected()
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        if self._brief_webhook:
+            await self._brief_webhook.cleanup()
+            self._brief_webhook = None
+        tasks = [task for task in (self._task, self._brief_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._task = self._brief_task = None
         if self._client:
             await self._client.aclose()
             self._client = None
@@ -184,6 +231,22 @@ class MeetStreamAdapter(BasePlatformAdapter):
         self._sent.clear()
 
     # -- Poll loop ---------------------------------------------------------------------------------
+
+    def _brief_sender(self, origin: dict):
+        return messaging.resolve_sender(self.gateway_runner, origin, profile_name_for_home(self._profile_home))
+
+    async def _run_briefs(self) -> None:
+        while self._running:
+            self._brief_wake.clear()
+            try:
+                await briefs.poll(Path(self._profile_home), self._client, _key(), self._llm,
+                                  self._brief_sender)
+            except Exception as exc:
+                logger.warning("[%s] Brief worker paused: %s", self.name, type(exc).__name__)
+            try:
+                await asyncio.wait_for(self._brief_wake.wait(), timeout=briefs.POLL_SECONDS)
+            except TimeoutError:
+                pass
 
     async def _run(self) -> None:
         failures = 0
@@ -196,7 +259,7 @@ class MeetStreamAdapter(BasePlatformAdapter):
                 return
             except api.MeetStreamError as e:
                 if e.status in (401, 403):
-                    # Only the account-wide calls (discovery) reach here; a per-bot 403 is handled per bot.
+                    # A per-bot 403 is handled per bot; 401 means this profile's key stopped working.
                     self._set_fatal_error("meetstream_unauthorized",
                                           f"MeetStream rejected the API key ({e.status}). Check {KEY_ENV}.",
                                           retryable=False)
@@ -214,45 +277,67 @@ class MeetStreamAdapter(BasePlatformAdapter):
     async def _tick(self) -> None:
         from .meetstream_tools import settings
 
-        self._bot_name = str(settings()["bot_name"]).strip() or "Hermes"
-        while _PENDING:
-            bot_id, _ = _PENDING.popitem()
-            self._bots.setdefault(bot_id, _Watch(bot_id, seeded=True))
+        config = settings()
+        self._bot_name = str(config["bot_name"]).strip() or "Hermes"
+        self._gif_base_url = str(config.get("status_gif_base_url") or "").strip()
         now = time.monotonic()
-        if self._discovery and now - self._discovered_at >= self._discovery:
-            self._discovered_at = now
-            await self._discover()
+        with _PENDING_LOCK:
+            for entry, (added_at, gifs) in list(_PENDING.items()):
+                profile, bot_id = entry
+                if now - added_at >= FRESH_BOT_S:
+                    del _PENDING[entry]
+                elif profile == self._profile_home:
+                    del _PENDING[entry]
+                    existing = self._bots.setdefault(bot_id, _Watch(bot_id, seeded=True))
+                    existing.status_gifs |= gifs
+
+        if self._discovery and now >= self._discovery_retry_at and now - self._discovered_at >= self._discovery:
+            try:
+                await self._discover()
+            except api.MeetStreamError as e:
+                if e.status in (401, 403):
+                    raise
+                self._discovery_retry_at = now + BACKOFF_S[-1]
+                logger.warning("[%s] Bot discovery failed (status %s); keeping existing watches", self.name, e.status)
+            else:
+                self._discovered_at = now
         for watch_ in list(self._bots.values()):
+            if now < watch_.retry_at:
+                continue
             try:
                 await self._poll_bot(watch_)
                 watch_.failures = 0
             except (api.MeetStreamError, ValueError) as e:
-                watch_.failures += 1
-                logger.warning("[%s] Bot %s: %s", self.name, watch_.bot_id, e)
-                if watch_.failures >= MAX_BOT_FAILURES or getattr(e, "status", 0) in (403, 404):
-                    logger.info("[%s] No longer watching bot %s", self.name, watch_.bot_id)
+                status = getattr(e, "status", 0)
+                if status == 401:
+                    raise
+                logger.warning("[%s] Bot %s poll failed (status %s)", self.name, watch_.bot_id, status)
+                if status in (403, 404) or isinstance(e, ValueError):
                     self._forget(watch_.bot_id)
+                else:
+                    watch_.failures += 1
+                    watch_.retry_at = now + BACKOFF_S[min(watch_.failures, len(BACKOFF_S)) - 1]
 
     async def _discover(self) -> None:
         since = (datetime.now(tz=UTC) - timedelta(days=1)).date().isoformat()
-        params: dict[str, Any] = {"from": since, "limit": 50}
-        for _ in range(MAX_LIST_PAGES):
-            data = await api.list_bots(self._client, _key(), params)
-            for record in data.get("bots") or []:
+        async for records, _ in api.bot_pages(self._client, _key(), {"from": since, "limit": 50}):
+            for record in records:
                 self._consider(record)
-            cursor = data.get("nextCursor")
-            if not data.get("hasNextPage") or not cursor:
-                break
-            params = {**params, "cursor": cursor}
 
     def _consider(self, record: dict) -> None:
         bot_id = str(api.field(record, "bot_id", "BotID", "id", default="") or "")
         status = api.norm_status(api.field(record, "status", "Status"))
-        if not bot_id or bot_id in self._bots or status in api.ENDED or not api.is_hermes_bot(record, self._bot_name):
+        if not bot_id or status in api.JOIN_FINISHED or not api.is_hermes_bot(record, self._bot_name):
             return
-        fresh = time.time() - _created_epoch(record) < FRESH_BOT_S
+        attrs = api.field(record, "custom_attributes", "CustomAttributes")
+        gifs = isinstance(attrs, dict) and attrs.get(api.GIF_ATTR) is True
+        if bot_id in self._bots:
+            self._bots[bot_id].status_gifs |= gifs
+            return
+        created = api.bot_created_at(record)
+        fresh = created >= self._started_at and time.time() - created < FRESH_BOT_S
         logger.info("[%s] Watching bot %s (%s)", self.name, bot_id, status or "unknown status")
-        self._bots[bot_id] = _Watch(bot_id, status=status, seeded=fresh)
+        self._bots[bot_id] = _Watch(bot_id, status=status, seeded=fresh, status_gifs=gifs)
 
     def _forget(self, bot_id: str) -> None:
         self._bots.pop(bot_id, None)
@@ -261,15 +346,26 @@ class MeetStreamAdapter(BasePlatformAdapter):
     async def _poll_bot(self, w: _Watch) -> None:
         now = time.monotonic()
         if not w.status or now - w.checked_at >= STATUS_REFRESH_S:
+            status = await api.bot_status(self._client, _key(), w.bot_id)
+            w.status = api.norm_status(api.field(status, "status", "Status"))
             w.checked_at = now
-            w.status = api.norm_status((await api.bot_status(self._client, _key(), w.bot_id)).get("status"))
-        if w.status in api.ENDED:
+        if w.status in api.JOIN_FINISHED:
             logger.info("[%s] Bot %s ended (%s); no longer watching", self.name, w.bot_id, w.status)
             self._forget(w.bot_id)
             return
         if w.status not in api.CHAT_READY:
             return
+        if now < w.chat_retry_at:
+            return
         messages = await api.get_chats(self._client, _key(), w.bot_id)
+        if messages is None:
+            if not w.chat_pending:
+                logger.info("[%s] Chat artifact for bot %s is pending; live replies require live events",
+                            self.name, w.bot_id)
+            w.chat_pending = True
+            w.chat_retry_at = now + STATUS_REFRESH_S
+            return
+        w.chat_pending = False
         if not w.seeded:
             w.seen.update(self._message_id(w.bot_id, m) for m in messages)
             w.seeded = True
@@ -287,6 +383,26 @@ class MeetStreamAdapter(BasePlatformAdapter):
                                type(e).__name__)
                 logger.debug("[%s] Failed chat message %s", self.name, msg_id, exc_info=True)
 
+    async def _show_status(self, w: _Watch, state: str) -> None:
+        if not w.status_gifs or w.status not in api.CHAT_READY:
+            return
+        async with w.gif_lock:
+            now = time.monotonic()
+            refresh = api.GIF_DURATION - 2
+            if now < w.gif_retry_at or (w.gif_state == state and now - w.gif_at < refresh):
+                return
+            try:
+                await asyncio.wait_for(api.send_status_gif(
+                    self._client, _key(), w.bot_id, state, base_url=self._gif_base_url,
+                ), 2)
+            except (api.MeetStreamError, OSError, TimeoutError, ValueError) as e:
+                w.gif_retry_at = now + STATUS_REFRESH_S
+                logger.debug("[%s] Status GIF unavailable for bot %s: %s",
+                             self.name, w.bot_id, type(e).__name__)
+            else:
+                w.gif_state = state
+                w.gif_at = now
+
     @staticmethod
     def _message_id(bot_id: str, message: dict) -> str:
         ref = message.get("messageId") or f"{message.get('timestamp')}|{message.get('speakerName')}|{message.get('text')}"
@@ -294,7 +410,7 @@ class MeetStreamAdapter(BasePlatformAdapter):
 
     def _is_own(self, bot_id: str, sender: str, text: str) -> bool:
         own = normalize_name(self._bot_name)
-        if normalize_name(sender).startswith(own):  # "Hermes", "Hermes (Bot)", "Hermes 🤖"
+        if normalize_name(sender) in {own, f"{own} (bot)", f"{own} 🤖"}:
             return True
         body = normalize_name(text)
         return any(body == normalize_name(s) or (len(body) > 40 and normalize_name(s).startswith(body))
@@ -329,9 +445,12 @@ class MeetStreamAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"Hermes is not in a call with bot {chat_id}")
         sent = self._sent.setdefault(chat_id, [])
         try:
+            watch = self._bots[chat_id]
+            if watch.status_gifs:
+                await self._show_status(watch, "working")
             for part in api.chunks(content):
-                sent.append(part)
                 await api.send_message(self._client, _key(), chat_id, part)
+                sent.append(part)
         except (api.MeetStreamError, ValueError) as e:
             return SendResult(success=False, error=getattr(e, "detail", str(e)))
         finally:
@@ -339,7 +458,19 @@ class MeetStreamAdapter(BasePlatformAdapter):
         return SendResult(success=True)
 
     async def send_typing(self, chat_id: str, metadata: Optional[dict] = None) -> None:
-        return None  # meeting chat has no typing indicator
+        # Hermes only invokes this for an active gateway turn. No incoming turn, no thinking GIF.
+        watch = self._bots.get(chat_id)
+        if watch and watch.status_gifs:
+            now = time.monotonic()
+            if watch.typing_since is None:
+                watch.typing_since = now
+            state = "activity" if now - watch.typing_since >= api.GIF_DURATION - 2 else "thinking"
+            await self._show_status(watch, state)
+
+    async def stop_typing(self, chat_id: str) -> None:
+        watch = self._bots.get(chat_id)
+        if watch:
+            watch.typing_since = None
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": f"Meeting {chat_id[:8]}", "type": "group", "chat_id": chat_id}
