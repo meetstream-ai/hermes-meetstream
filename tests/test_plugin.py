@@ -61,6 +61,7 @@ class FakeMeetStream:
         self.page_size = 50
         self.broken: dict[str, int] = {}  # bot_id -> HTTP status its per-bot endpoints return
         self.bot_display = "Hermes"  # how the meeting shows the bot's own chat messages
+        self.create_error: httpx.Response | None = None  # answer create_bot with this instead
 
     def add_bot(self, bot_id, status="InMeeting", hermes=True, chats=(), name="Hermes", attrs=None, age_s=3600):
         if attrs is None:
@@ -80,6 +81,8 @@ class FakeMeetStream:
             return httpx.Response(401, json={"detail": "Invalid token."})
         path = request.url.path.removeprefix("/api/v1")
         parts = path.strip("/").split("/")
+        if path == "/bots/create_bot" and self.create_error is not None:
+            return self.create_error
         if path == "/bots/create_bot":
             if self.create_error is not None:
                 return self.create_error
@@ -424,6 +427,21 @@ class TestTools(PluginTestCase):
         out = json.loads(self.run_async(tools.handle_leave({"bot_id": "x"})))
         self.assertEqual(out["status_code"], 401)
         self.assertIn("MEETSTREAM_API_KEY", out["hint"])
+
+    def test_low_credit_gives_top_up_link_not_key_hint(self):
+        self.fake.create_error = httpx.Response(403, json={"message": "Low credits please recharge"})
+        out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
+        self.assertEqual(out["status_code"], 403)
+        self.assertIn("app.meetstream.ai/billing", out["hint"])
+        self.assertNotIn("MEETSTREAM_API_KEY", out["hint"])
+
+    def test_error_reads_message_first_and_keeps_retry_after(self):
+        self.fake.create_error = httpx.Response(
+            429, headers={"Retry-After": "37"},
+            json={"error": "rate_limit_exceeded", "message": "Too many bots created in the last minute"})
+        out = json.loads(self.run_async(tools.handle_join({"meeting_url": "https://meet.google.com/abc-defg-hij"})))
+        self.assertEqual(out["status_code"], 429)
+        self.assertEqual(out["error"], "Too many bots created in the last minute (retry after 37 s)")
 
     def test_status_lists_only_hermes_bots(self):
         self.fake.page_size = 1

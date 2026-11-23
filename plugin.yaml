@@ -58,7 +58,7 @@ config_schema:
     choices: [meetstream, meeting_captions, deepgram, assemblyai, none]
     default: meetstream
     label: "Transcription"
-    description: "Transcription provider for calls Hermes joins (MeetStream bills transcription per its pricing)."
+    description: "Transcription provider for calls Hermes joins. meetstream adds $0.10 per hour; deepgram and assemblyai need your own key saved in the MeetStream dashboard."
   join_message:
     type: str
     default: ""

@@ -94,3 +94,13 @@ are unclear, ask which meeting they mean and whether to attend or look up an exi
   the billing link from the tool. For other access errors, report the returned workspace or bot
   access issue. Workspace webhooks, recurring auto-join, storage and signed-in bots are
   configured in the MeetStream dashboard.
+
+## Voice agent requests
+
+Use this plugin for recording, transcription, private briefs and meeting-chat replies. When the
+user explicitly asks for a spoken voice agent, explain the available MeetStream options and ask
+whether they want to run their own stack or use a hosted agent if their preference is unclear.
+
+- For a self-managed stack, point to the [Bridge server guide](https://docs.meetstream.ai/guides/websockets/bridge-server-architecture) and [MeetStream Bridge starter](https://github.com/meetstream-ai/meetstream-agent).
+- For a hosted voice agent (MIA), point to [voice agent pricing and keys](https://docs.meetstream.ai/guides/mia/pricing-and-keys). MeetStream-managed keys apply to pipeline mode and availability varies by account. Realtime mode uses the user's OpenAI key. If managed keys are unavailable, explain the bring-your-own-key option. A hosted voice bot uses `agent_config_id`. Reserve the bridge sockets for self-managed bots.
+- Treat LiveKit bring-your-own infrastructure and Hermes as the voice agent's brain as upcoming tracks. Check the [integration paths](https://docs.meetstream.ai/guides/introduction/integration-paths) for current availability and pricing.

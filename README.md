@@ -9,6 +9,17 @@ After the call, Hermes uses the transcript to write notes, action items, and fol
 You must supply only one item: a MeetStream API key.
 You set the other options in the MeetStream dashboard.
 
+MeetStream has three build tracks. Use them in this order:
+
+1. **Recording bot.** A bot joins the call, records it, and transcribes it. 1a gives the transcript, the participants and the chat after the call. 1b gives live data during the call.
+   This plugin uses this track.
+2. **Bridge server (your own stack, local).** Use this track first when you want an agent that talks in the call.
+   Your server runs your own speech-to-text, LLM and text-to-speech.
+   Refer to [Voice answers in the call](#voice-answers-in-the-call).
+3. **Agents API infra (hosted by MeetStream).** MeetStream hosts the voice agent (API name MIA).
+   3a uses MeetStream's own, default keys. 3c uses your own keys.
+   3b (bring your own agent infra, LiveKit) and 3d (local agent: your own agent CLI, for example Hermes, as the brain) are coming soon. They are not available yet.
+
 ## What you get
 
 | Item | Name | What it does |
@@ -44,7 +55,7 @@ You set the other options in the MeetStream dashboard.
    Hermes keeps the key in the `.env` file of your profile.
 3. Start a new Hermes session.
 
-For local development or a custom revision, use the repository address:
+The Hermes plugin catalog can pin an earlier version of this plugin than the one on `main` (the catalog entry names the version). To install the latest `main`, use the repository address:
 
 ```bash
 hermes plugins install meetstream-ai/hermes-meetstream --enable
@@ -208,7 +219,7 @@ You set these values in **Settings → Plugins → Hermes in Meetings**, or in `
 | Setting | Default | What it does |
 |---|---|---|
 | `bot_name` | `Hermes` | The name of the bot in the call. People use this name to ask a question. |
-| `transcription` | `meetstream` | The transcription provider: `meetstream`, `meeting_captions`, `deepgram`, `assemblyai`, or `none`. |
+| `transcription` | `meetstream` | The transcription provider: `meetstream`, `meeting_captions`, `deepgram`, `assemblyai`, or `none`. `meetstream` adds $0.10 for each hour. For `deepgram` and `assemblyai`, save your own provider key in the MeetStream dashboard. |
 | `status_gifs` | `false` | Show status artwork on the bot tile for new Google Meet joins. |
 | `status_gif_base_url` | Empty | Public HTTPS directory for animated playback of the three supplied GIFs. |
 | `join_message` | A short introduction | The chat message that the bot sends when it joins. `{name}` changes to the bot name. |
@@ -273,16 +284,48 @@ The plugin uses your MeetStream API key at `https://api.meetstream.ai`. For requ
 - The plugin starts no shell commands and sends no telemetry.
 - The plugin does not update itself.
 
-MeetStream bills bot time and transcription to your MeetStream account. If a join fails because
-the account is out of credit, add prepaid credit in the [MeetStream billing dashboard](https://app.meetstream.ai/billing)
-before retrying.
+MeetStream bills the bot time and the transcription to your MeetStream account from prepaid credit.
 Refer to <https://meetstream.ai/pricing>.
+If the account has no credit, `meetstream_join` tells Hermes to give you the top-up link: <https://app.meetstream.ai/billing>.
+
+## Voice answers in the call
+
+This plugin answers in the meeting chat. If you want an agent that talks in the call, use these tracks after the recording bot.
+Use them in this order:
+
+| Track | What you do | Price for each meeting hour |
+|---|---|---|
+| 2. Bridge server (your own stack, local) | The bot sends the live audio of the call to your server (`live_audio_required.websocket_url`). Your server sends audio, chat and images back on the control socket (`socket_connection_url.websocket_url`). You run your own speech-to-text, LLM and text-to-speech. Free local models are possible, for example faster-whisper or Parakeet, a model in Ollama, and Piper or Kokoro. On a laptop, use a local tunnel (ngrok or cloudflared). Refer to [Bridge server architecture](https://docs.meetstream.ai/guides/websockets/bridge-server-architecture) and the starter [MeetStream Bridge](https://github.com/meetstream-ai/meetstream-agent). | Bot price only. MeetStream charges no agent infrastructure and no model tokens. |
+| 3. Agents API infra (MIA, hosted by MeetStream) | MeetStream hosts the agent. 3a: MeetStream's own, default keys. Inbuilt keys work in pipeline mode only: Deepgram (speech-to-text) and OpenAI (LLM and voice). Realtime mode runs on OpenAI and needs your own OpenAI key. 3c: your own provider keys (OpenAI, Anthropic, Deepgram, ElevenLabs and others). | Bot price + $0.25 agent infrastructure + the price of the models you pick. The agent editor in the dashboard shows the rate before the bot runs. With 3c, your provider bills you for model usage. |
+| 3b. Bring your own agent infra (LiveKit) | Coming soon. Not available yet. | |
+| 3d. Local agent: Hermes as the brain | Coming soon. Not available in production yet. Hermes on your computer will write what the voice agent says, through the MeetStream [Agent Kit](https://github.com/meetstream-ai/agent-kit) (a preview) and `model.provider: "local_agent"`. | |
+
+The bot price is $0.35 for each recording hour ($0.25 at volume). Refer to <https://meetstream.ai/pricing>.
+If you do not want to operate servers, use track 3a or 3c.
+Inbuilt keys are not on for all accounts yet. If the API says "MeetStream-managed keys are not available for ... Use your own key.", use track 3c. Do not retry the same request.
+A hosted agent bot (track 3) takes only `agent_config_id`. Do not add the bridge sockets to that bot.
+
+Hermes can use MeetStream today for recording (this plugin) and with hosted agents (track 3).
+Hermes as the brain of the voice agent (track 3d) is coming soon. When it is available, know this:
+the speech and chat of the meeting will go to an agent that has access to your computer and your terminal, and a participant can try to give it instructions (prompt injection).
+Use the lowest access level.
 
 ## Hermes in Meetings or the MeetStream connector
 
 Hermes also has a MeetStream connector in its MCP catalog (`hermes mcp install meetstream`).
 The connector exposes the broader MeetStream MCP toolset. The plugin adds a meeting-specific
 skill and gateway adapter. Installing both gives Hermes two sets of meeting tools.
+
+## Latest docs
+
+- Integration paths: <https://docs.meetstream.ai/guides/introduction/integration-paths>
+- Bridge server (track 2): <https://docs.meetstream.ai/guides/websockets/bridge-server-architecture>
+- First bot: <https://docs.meetstream.ai/guides/get-started/create-your-first-bot>
+- Voice agent pricing and keys: <https://docs.meetstream.ai/guides/mia/pricing-and-keys>
+- What is MIA: <https://docs.meetstream.ai/guides/mia/what-is-mia>
+- Local agent (`local_agent`, track 3d, coming soon): <https://docs.meetstream.ai/guides/features/mia-screen-sharing-and-custom-agents>
+
+For the latest details, fetch a page with `.md` at the end of the URL, read <https://docs.meetstream.ai/llms.txt>, or connect the docs MCP server at <https://docs.meetstream.ai/_mcp/server>.
 
 ## Development
 

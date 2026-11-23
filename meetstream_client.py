@@ -20,7 +20,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.meetstream.ai/api/v1"
-BILLING_URL = "https://app.meetstream.ai/billing"
+BILLING_URL = "https://app.meetstream.ai/billing"  # where the account owner adds prepaid credits
 TIMEOUT_S = 20.0
 MAX_LIST_PAGES = 4
 MAX_CHAT = 2000  # send_message rejects longer bodies (SendMessageRequest.maxLength)
@@ -80,6 +80,7 @@ def _detail(resp: httpx.Response) -> str:
     except ValueError:
         return resp.text[:200]
     if isinstance(data, dict):
+        # MeetStream error bodies are {"message": ...}; older answers used "error" or "detail".
         for key in ("message", "error", "detail"):
             if data.get(key):
                 return str(data[key])[:200]
