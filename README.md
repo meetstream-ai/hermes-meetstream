@@ -295,15 +295,33 @@ Use them in this order:
 
 | Track | What you do | Price for each meeting hour |
 |---|---|---|
-| 2. Bridge server (your own stack, local) | The bot sends the live audio of the call to your server (`live_audio_required.websocket_url`). Your server sends audio, chat and images back on the control socket (`socket_connection_url.websocket_url`). You run your own speech-to-text, LLM and text-to-speech. Free local models are possible, for example faster-whisper or Parakeet, a model in Ollama, and Piper or Kokoro. On a laptop, use a local tunnel (ngrok or cloudflared). Refer to [Bridge server architecture](https://docs.meetstream.ai/guides/websockets/bridge-server-architecture) and the starter [MeetStream Bridge](https://github.com/meetstream-ai/meetstream-agent). | Bot price only. MeetStream charges no agent infrastructure and no model tokens. |
+| 2. Bridge server (your own stack, local) | The bot sends the live audio of the call to your server (`live_audio_required.websocket_url`). Your server sends audio, chat and images back on the control socket (`socket_connection_url.websocket_url`). You run your own speech-to-text, LLM and text-to-speech. Free local models are possible, for example faster-whisper or Parakeet, a model in Ollama, and Piper or Kokoro. On a laptop, use a local tunnel (ngrok or cloudflared). With the CLI: `meetstream join <url> --live-audio-ws wss://<public-url>/audio --socket-ws wss://<public-url>/control`. Refer to [Bridge server architecture](https://docs.meetstream.ai/guides/websockets/bridge-server-architecture) and the starter [MeetStream Bridge](https://github.com/meetstream-ai/meetstream-agent). | Bot price only. MeetStream charges no agent infrastructure and no model tokens. |
 | 3. Agents API infra (MIA, hosted by MeetStream) | MeetStream hosts the agent. 3a: MeetStream's own, default keys. Inbuilt keys work in pipeline mode only: Deepgram (speech-to-text) and OpenAI (LLM and voice). Realtime mode runs on OpenAI and needs your own OpenAI key. 3c: your own provider keys (OpenAI, Anthropic, Deepgram, ElevenLabs and others). | Bot price + $0.25 agent infrastructure + the price of the models you pick. The agent editor in the dashboard shows the rate before the bot runs. With 3c, your provider bills you for model usage. |
 | 3b. Bring your own agent infra (LiveKit) | Coming soon. Not available yet. | |
-| 3d. Local agent: Hermes as the brain | Coming soon. Not available in production yet. Hermes on your computer will write what the voice agent says, through the MeetStream [Agent Kit](https://github.com/meetstream-ai/agent-kit) (a preview) and `model.provider: "local_agent"`. | |
+| 3d. Local agent: Hermes as the brain | Coming soon. Not available in production yet. Hermes on your computer will write what the voice agent says, through `meetstream setup` and `meetstream agent serve` over the MeetStream relay (no tunnel). | |
 
 The bot price is $0.35 for each recording hour ($0.25 at volume). Refer to <https://meetstream.ai/pricing>.
 If you do not want to operate servers, use track 3a or 3c.
 Inbuilt keys are not on for all accounts yet. If the API says "MeetStream-managed keys are not available for ... Use your own key.", use track 3c. Do not retry the same request.
 A hosted agent bot (track 3) takes only `agent_config_id`. Do not add the bridge sockets to that bot.
+
+### Set up a voice agent with the MeetStream CLI
+
+The `meetstream` CLI can make the agent and send it to a call. Install the CLI with one of these commands:
+
+```bash
+npm install -g @meetstream/cli          # or: npx -y @meetstream/cli <command>
+pipx install meetstream-cli             # or: uvx --from meetstream-cli meetstream <command>
+brew install meetstream-ai/tap/meetstream
+```
+
+Binaries are at <https://github.com/meetstream-ai/cli/releases>.
+To sign in, run `meetstream login`. The command opens your browser and keeps a key. You can also set `MEETSTREAM_API_KEY`.
+
+- Track 3a: run `meetstream setup --mode hosted`, then `meetstream join <url> --agent-config <id>`.
+- Track 3c: run `meetstream setup --mode byok`. Add your provider keys in the dashboard. The setup does not ask for keys.
+
+When Hermes runs the CLI, Hermes uses `meetstream <command> --json --no-input` and reads the JSON output.
 
 Hermes can use MeetStream today for recording (this plugin) and with hosted agents (track 3).
 Hermes as the brain of the voice agent (track 3d) is coming soon. When it is available, know this:

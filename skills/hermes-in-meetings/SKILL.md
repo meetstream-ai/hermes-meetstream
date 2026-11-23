@@ -2,7 +2,7 @@
 name: hermes-in-meetings
 description: Use when a user asks Hermes to join, record, take notes, check status, or leave a Zoom, Google Meet, or Teams call. Also use for past meeting decisions, transcripts, brief recovery, and named calendar events.
 metadata:
-  version: "0.6.0"
+  version: "0.7.1"
   hermes:
     tags: [meetings, zoom, google-meet, microsoft-teams, transcription, notes]
 ---
@@ -103,4 +103,5 @@ whether they want to run their own stack or use a hosted agent if their preferen
 
 - For a self-managed stack, point to the [Bridge server guide](https://docs.meetstream.ai/guides/websockets/bridge-server-architecture) and [MeetStream Bridge starter](https://github.com/meetstream-ai/meetstream-agent).
 - For a hosted voice agent (MIA), point to [voice agent pricing and keys](https://docs.meetstream.ai/guides/mia/pricing-and-keys). MeetStream-managed keys apply to pipeline mode and availability varies by account. Realtime mode uses the user's OpenAI key. If managed keys are unavailable, explain the bring-your-own-key option. A hosted voice bot uses `agent_config_id`. Reserve the bridge sockets for self-managed bots.
-- Treat LiveKit bring-your-own infrastructure and Hermes as the voice agent's brain as upcoming tracks. Check the [integration paths](https://docs.meetstream.ai/guides/introduction/integration-paths) for current availability and pricing.
+- With the `meetstream` CLI (if the user has it): `meetstream setup --mode hosted --json --no-input` for a hosted agent on MeetStream keys, or `--mode byok` for the user's own provider keys (keys go in the dashboard; setup never asks for them), then `meetstream join <url> --agent-config <id> --json --no-input`.
+- LiveKit bring-your-own infrastructure (track 3b) and Hermes as the voice agent's brain (track 3d, through `meetstream setup` and `meetstream agent serve` over the MeetStream relay) are COMING SOON. They are not in production. Never offer them as working options and give no setup steps. If the user asks for Hermes as the brain, say it is coming soon, that meeting speech will then reach an agent with access to their computer and terminal (prompt injection), and offer a self-managed stack or a hosted agent for today. Check the [integration paths](https://docs.meetstream.ai/guides/introduction/integration-paths) for current availability and pricing.
