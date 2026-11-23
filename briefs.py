@@ -55,6 +55,18 @@ def session_source(home: Path, session_id: str) -> str | None:
         return row.get("source") if row else None
 
 
+def _history_api(db):
+    """Compression tip and idempotent note writer on both SessionDB generations.
+
+    Newer Hermes builds keep these on the storage interface behind the deprecated facade.
+    """
+    tip, note = getattr(db, "get_compression_tip", None), getattr(db, "append_completion_note", None)
+    if tip and note:
+        return tip, note
+    store = db._store
+    return store.lineage.tip, store.messages.append_completion_note
+
+
 class Briefs:
     def __init__(self, home: Path):
         self.home = home
@@ -119,7 +131,7 @@ class Briefs:
             row = ledger.execute("SELECT * FROM briefs WHERE bot_id = ?", (bot_id,)).fetchone()
             if row is None:
                 return None
-            destination = history.get_compression_tip(row["session_id"]) or row["session_id"]
+            destination = _history_api(history)[0](row["session_id"]) or row["session_id"]
             if session_id not in {row["session_id"], destination}:
                 return None
             result = {"state": row["state"], "message_id": row["message_id"]}
@@ -197,12 +209,13 @@ class Briefs:
         if not (self.home / "state.db").is_file():
             return False
         with SessionDB(self.home / "state.db") as db:
-            destination = db.get_compression_tip(row["session_id"]) or row["session_id"]
+            tip, note = _history_api(db)
+            destination = tip(row["session_id"]) or row["session_id"]
             session = db.get_session(destination)
             if not session or session.get("source") not in allowed:
                 return False
             # Hermes checks this admission ID and appends the history row in one transaction.
-            db.append_completion_note(
+            note(
                 destination, "meetstream:brief:" + row["bot_id"], text, "process_complete",
                 {"display_text": "MeetStream decision brief"},
             )
