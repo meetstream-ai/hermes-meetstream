@@ -404,12 +404,12 @@ async def transcript(client, key, bot_id: str) -> tuple[Optional[str], Any]:
 
 
 async def _read_transcript(client, key, bot_id: str, tid: str | None) -> Any:
-    # The public API reads a transcript only by transcript_id; no ID yet means still pending.
-    if not tid:
-        return None
-    if not _BOT_ID_RE.fullmatch(str(tid)):
-        raise MeetStreamError(0, "MeetStream returned a malformed transcript_id")
-    path = f"/transcript/{tid}/get_transcript"
+    if tid:
+        if not _BOT_ID_RE.fullmatch(str(tid)):
+            raise MeetStreamError(0, "MeetStream returned a malformed transcript_id")
+        path = f"/transcript/{tid}/get_transcript"
+    else:
+        path = bot_path(bot_id, "get_transcript")
     try:
         data = await request(client, key, "GET", path, pending_as_none=True)
     except MeetStreamError as e:

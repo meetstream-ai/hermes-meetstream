@@ -133,6 +133,8 @@ class FakeMeetStream:
             return httpx.Response(200, json={"chatMessages": bot["chats"]})
         if action == "transcriptions":
             return httpx.Response(200, json={"transcriptions": []})
+        if action == "get_transcript" and self.transcript_responses:
+            return self.transcript_responses.pop(0)
         if action == "send_message":
             if self.chat_send_error_after is not None and len(self.sent) >= self.chat_send_error_after:
                 return httpx.Response(429, json={"message": "Rate limited"})
@@ -402,7 +404,6 @@ class TestTools(PluginTestCase):
 
     def test_transcript_by_bot_id_reports_disabled_transcription(self):
         self.fake.add_bot("b1", status="Done")
-        self.fake.bots["b1"]["detail"] = {"transcript_id": "t1"}
         self.fake.transcript_responses = [httpx.Response(409, json={"message": "Transcription was not enabled"})]
         out = json.loads(self.run_async(tools.handle_transcript({"bot_id": "b1"})))
         self.assertEqual(out["transcript_state"], "unavailable")
